@@ -1531,7 +1531,8 @@ document.addEventListener("click", async (event) => {
     const form = choice.closest("form");
     if (!form) return;
     const group = choice.dataset.select;
-    form.dataset[group] = choice.dataset.value;
+    const datasetKey = group.replace(/-([a-z])/g, (_, character) => character.toUpperCase());
+    form.dataset[datasetKey] = choice.dataset.value;
     form.querySelectorAll(`[data-select="${group}"]`).forEach((button) => {
       const selected = button === choice;
       button.classList.toggle("selected", selected);
