@@ -379,10 +379,22 @@ h3 {
 }
 
 .metric-tile {
+  width: 100%;
   min-height: 88px;
   padding: 14px;
+  border: 0;
   border-radius: 20px;
   background: var(--soft-brand);
+  color: var(--body);
+  font: inherit;
+  text-align: left;
+  transition: transform 160ms ease, background 160ms ease;
+}
+
+.metric-tile:hover {
+  background: var(--brand);
+  color: var(--background);
+  transform: translateY(-1px);
 }
 
 .metric-tile-icon {
@@ -522,6 +534,11 @@ h3 {
   border-style: dashed;
 }
 
+.day-cell.fertile {
+  border-color: var(--brand);
+  background: var(--soft-brand);
+}
+
 .day-cell.period.predicted {
   border-style: solid;
 }
@@ -534,6 +551,10 @@ h3 {
   height: 5px;
   border-radius: 50%;
   background: var(--body);
+}
+
+.day-dot.fertile-dot {
+  background: var(--brand);
 }
 
 .legend {
@@ -566,6 +587,11 @@ h3 {
 .legend-marker.predicted-marker {
   border-color: var(--brand);
   border-style: dashed;
+}
+
+.legend-marker.fertile-marker {
+  border-color: var(--brand);
+  background: var(--soft-brand);
 }
 
 .overview-grid,
@@ -800,6 +826,12 @@ h3 {
 .settings-list {
   display: grid;
   gap: 14px;
+}
+
+.settings-divider {
+  height: 1px;
+  margin: 28px 0;
+  background: var(--soft-body);
 }
 
 .settings-row {

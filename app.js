@@ -3,8 +3,25 @@ const DB_NAME = "lotus-local-vault";
 const STORE_NAME = "encrypted-vault";
 const VAULT_KEY = "primary";
 const SUPABASE_TABLE = "x7m2";
+const PUSH_TABLE = "q4n8";
 const PBKDF2_ITERATIONS = 150000;
 const WATER_GOAL = 8;
+const ENTRY_REMINDER_TEXT = "Take some time to pause and reflect.";
+const ENTRY_REMINDER_HOUR = 21;
+const FERTILE_WINDOW_DAYS = 5;
+// Sohda et al. (JMIR 2017;19:e391) model the follicular phase as a linear
+// function of the mean of the user's recent cycle lengths. These are their
+// published coefficients for 1 through 8 prior cycles.
+const OPTIMIZED_FOLLICULAR_MODELS = [
+  { slope: 0.528, intercept: 0.039 },
+  { slope: 0.528, intercept: 0.017 },
+  { slope: 0.527, intercept: 0.012 },
+  { slope: 0.526, intercept: 0.003 },
+  { slope: 0.526, intercept: -0.002 },
+  { slope: 0.525, intercept: -0.010 },
+  { slope: 0.525, intercept: -0.011 },
+  { slope: 0.525, intercept: -0.011 }
+];
 const SYMPTOMS = ["Cramps", "Headache", "Bloating", "Tender breasts", "Mood changes", "Fatigue", "Backache", "Nausea"];
 const FLOW_OPTIONS = [
   ["none", "None"],
@@ -35,6 +52,7 @@ let selectedDate = localDateString(new Date());
 let calendarCursor = new Date();
 let toastTimer = null;
 let syncTimer = null;
+let reminderTimer = null;
 
 function $(selector, parent = document) {
   return parent.querySelector(selector);
@@ -220,6 +238,13 @@ function defaultState(name) {
     periodStarts: [],
     dailyLogs: {},
     backup: { lastBackupAt: null },
+    notifications: {
+      dailyEntry: false,
+      lastDeliveredDate: null,
+      pushEnabled: false,
+      pushSubscriptionId: null,
+      vapidPublicKey: ""
+    },
     sync: {
       mode: "local-first",
       enabled: false,
@@ -238,6 +263,25 @@ function defaultState(name) {
   };
 }
 
+function derivePeriodStarts(existingStarts = [], dailyLogs = {}) {
+  const loggedFlowDates = Object.entries(dailyLogs)
+    .filter(([date, log]) => /^\d{4}-\d{2}-\d{2}$/.test(date) && log?.flow && log.flow !== "none")
+    .map(([date]) => date);
+  const preservedStarts = existingStarts
+    .filter((date) => /^\d{4}-\d{2}-\d{2}$/.test(date) && (!dailyLogs[date] || dailyLogs[date].flow !== "none"));
+  const candidates = [...new Set([...loggedFlowDates, ...preservedStarts])].sort();
+  const starts = [];
+  candidates.forEach((date) => {
+    const previousStart = starts.at(-1);
+    if (!previousStart || daysBetween(previousStart, date) > 10) starts.push(date);
+  });
+  return starts;
+}
+
+function recalculatePeriodStarts() {
+  appState.periodStarts = derivePeriodStarts(appState.periodStarts, appState.dailyLogs);
+}
+
 function normaliseState(state) {
   const profile = state.profile || {};
   const dailyLogs = state.dailyLogs || {};
@@ -253,9 +297,16 @@ function normaliseState(state) {
       periodLength: clamp(Number(profile.periodLength) || 5, 2, 10),
       createdAt: profile.createdAt || new Date().toISOString()
     },
-    periodStarts: [...new Set((state.periodStarts || []).filter((date) => /^\d{4}-\d{2}-\d{2}$/.test(date)))].sort(),
+    periodStarts: derivePeriodStarts(state.periodStarts || [], dailyLogs),
     dailyLogs,
     backup: { lastBackupAt: state.backup?.lastBackupAt || null },
+    notifications: {
+      dailyEntry: Boolean(state.notifications?.dailyEntry),
+      lastDeliveredDate: state.notifications?.lastDeliveredDate || null,
+      pushEnabled: Boolean(state.notifications?.pushEnabled),
+      pushSubscriptionId: state.notifications?.pushSubscriptionId || null,
+      vapidPublicKey: state.notifications?.vapidPublicKey || ""
+    },
     sync: {
       mode: state.sync?.mode || "local-first",
       enabled: Boolean(state.sync?.enabled),
@@ -344,6 +395,11 @@ function syncSafeState() {
   const copy = JSON.parse(JSON.stringify(appState));
   delete copy.supabase;
   delete copy.sync;
+  if (copy.notifications) {
+    // A browser subscription belongs to this device, not to the shared vault.
+    copy.notifications.pushEnabled = false;
+    copy.notifications.pushSubscriptionId = null;
+  }
   return copy;
 }
 
@@ -398,9 +454,16 @@ async function pushRemoteVault() {
 async function applyRemoteVault(row) {
   const localSupabase = appState.supabase;
   const localSync = appState.sync;
+  const localNotifications = appState.notifications;
   const remoteState = normaliseState(await decryptEnvelope(remoteEnvelope(row), currentPassword));
   appState = remoteState;
   appState.supabase = localSupabase;
+  appState.notifications = {
+    ...appState.notifications,
+    pushEnabled: Boolean(localNotifications?.pushEnabled),
+    pushSubscriptionId: localNotifications?.pushSubscriptionId || null,
+    vapidPublicKey: localNotifications?.vapidPublicKey || appState.notifications.vapidPublicKey
+  };
   appState.sync = {
     ...localSync,
     enabled: true,
@@ -473,10 +536,48 @@ function getLatestPeriodStart(dateString = localDateString(new Date())) {
   return starts.at(-1) || null;
 }
 
+function getCompletedCycles() {
+  const starts = [...(appState?.periodStarts || [])].sort();
+  return starts.slice(0, -1).map((start, index) => ({
+    start,
+    end: starts[index + 1],
+    length: daysBetween(start, starts[index + 1])
+  })).filter((cycle) => cycle.length >= 20 && cycle.length <= 45);
+}
+
+function getPredictionModel() {
+  if (!appState?.periodStarts?.length) return null;
+  const completedCycles = getCompletedCycles();
+  const recentLengths = completedCycles.slice(-8).map((cycle) => cycle.length);
+  const cycleLength = recentLengths.length
+    ? Math.round(recentLengths.reduce((sum, length) => sum + length, 0) / recentLengths.length)
+    : clamp(Number(appState.profile.averageCycleLength) || 28, 21, 45);
+  const historyCount = recentLengths.length || 1;
+  const model = OPTIMIZED_FOLLICULAR_MODELS[Math.min(historyCount, OPTIMIZED_FOLLICULAR_MODELS.length) - 1];
+  const follicularPhaseDays = clamp(
+    Math.round(model.slope * cycleLength + model.intercept),
+    7,
+    Math.max(8, cycleLength - 7)
+  );
+  const variation = recentLengths.length > 1
+    ? Math.round(Math.sqrt(recentLengths.reduce((sum, length) => sum + (length - cycleLength) ** 2, 0) / recentLengths.length))
+    : 0;
+  return { cycleLength, historyCount: recentLengths.length, follicularPhaseDays, variation };
+}
+
+function estimateOvulationOffset(cycleLength, historyCount = 1) {
+  const model = OPTIMIZED_FOLLICULAR_MODELS[Math.min(Math.max(historyCount, 1), OPTIMIZED_FOLLICULAR_MODELS.length) - 1];
+  return clamp(
+    Math.round(model.slope * cycleLength + model.intercept),
+    7,
+    Math.max(8, cycleLength - 7)
+  );
+}
+
 function getNextPeriodStart(dateString = localDateString(new Date())) {
   const latest = getLatestPeriodStart(dateString);
-  if (!latest) return null;
-  return addDays(latest, appState.profile.averageCycleLength);
+  const model = getPredictionModel();
+  return latest && model ? addDays(latest, model.cycleLength) : null;
 }
 
 function currentCycleDay(dateString = localDateString(new Date())) {
@@ -485,16 +586,282 @@ function currentCycleDay(dateString = localDateString(new Date())) {
 }
 
 function isPredictedPeriodDate(dateString) {
-  const predicted = getNextPeriodStart(localDateString(new Date()));
-  if (!predicted) return false;
-  const day = daysBetween(predicted, dateString);
-  return day >= 0 && day < appState.profile.periodLength;
+  return getCycleWindows().some((window) => window.projectedPeriod
+    && dateString >= window.start
+    && dateString < addDays(window.start, appState.profile.periodLength)
+    && !isPeriodDate(dateString));
+}
+
+function createCycleWindow(start, cycleLength, historyCount, projectedPeriod = false) {
+  // Wilcox et al. (BMJ 2000) describe six fertile days: the five before
+  // ovulation and the estimated ovulation day itself.
+  const ovulationOffset = estimateOvulationOffset(cycleLength, historyCount);
+  const ovulation = addDays(start, ovulationOffset);
+  return {
+    start,
+    end: addDays(start, cycleLength),
+    ovulation,
+    fertileStart: addDays(ovulation, -FERTILE_WINDOW_DAYS),
+    fertileEnd: ovulation,
+    projectedPeriod
+  };
+}
+
+function getCycleWindows() {
+  const starts = [...(appState?.periodStarts || [])].sort();
+  const model = getPredictionModel();
+  if (!starts.length || !model) return [];
+  const windows = [];
+
+  for (let index = 0; index < starts.length - 1; index += 1) {
+    const cycleLength = daysBetween(starts[index], starts[index + 1]);
+    if (cycleLength >= 20 && cycleLength <= 45) {
+      windows.push(createCycleWindow(starts[index], cycleLength, model.historyCount || 1));
+    }
+  }
+
+  let cycleStart = starts.at(-1);
+  for (let index = 0; index < 6; index += 1) {
+    windows.push(createCycleWindow(cycleStart, model.cycleLength, model.historyCount || 1, index > 0));
+    cycleStart = addDays(cycleStart, model.cycleLength);
+  }
+  return windows;
+}
+
+function isPossibleFertileDate(dateString) {
+  if (isPeriodDate(dateString)) return false;
+  return getCycleWindows().some((window) => dateString >= window.fertileStart && dateString <= window.fertileEnd);
+}
+
+function getNextFertileWindow(dateString = localDateString(new Date())) {
+  return getCycleWindows().find((window) => window.fertileEnd >= dateString) || null;
+}
+
+function formatDateRange(start, end) {
+  const startDate = parseDate(start);
+  const endDate = parseDate(end);
+  const startLabel = formatDate(start, { month: "short", day: "numeric" });
+  const endLabel = formatDate(end, { month: "short", day: "numeric" });
+  return startDate.getFullYear() === endDate.getFullYear() && startDate.getMonth() === endDate.getMonth()
+    ? `${startLabel}–${endDate.getDate()}`
+    : `${startLabel}–${endLabel}`;
 }
 
 function isBackupDue() {
   const last = appState?.backup?.lastBackupAt;
   if (!last) return true;
   return Date.now() - new Date(last).getTime() > 30 * 86400000;
+}
+
+function notificationsAvailable() {
+  return typeof window !== "undefined" && "Notification" in window;
+}
+
+function scheduleDailyReminder() {
+  clearTimeout(reminderTimer);
+  reminderTimer = null;
+  if (!appState?.notifications?.dailyEntry || !notificationsAvailable() || Notification.permission !== "granted") return;
+  const now = new Date();
+  const nextReminder = new Date(now);
+  nextReminder.setHours(ENTRY_REMINDER_HOUR, 0, 0, 0);
+  if (nextReminder <= now) nextReminder.setDate(nextReminder.getDate() + 1);
+  reminderTimer = setTimeout(() => deliverDailyReminder(), Math.max(1000, nextReminder.getTime() - now.getTime()));
+}
+
+async function deliverDailyReminder() {
+  reminderTimer = null;
+  if (!appState?.notifications?.dailyEntry || !notificationsAvailable() || Notification.permission !== "granted") return;
+  const today = localDateString(new Date());
+  if (appState.notifications.lastDeliveredDate === today) {
+    scheduleDailyReminder();
+    return;
+  }
+  try {
+    new Notification("Lotus", {
+      body: ENTRY_REMINDER_TEXT,
+      icon: "./assets/lotus-192.png",
+      badge: "./assets/lotus-192.png",
+      tag: "lotus-daily-entry"
+    });
+    appState.notifications.lastDeliveredDate = today;
+    await saveVault({ markChanged: false, queue: false });
+  } catch {
+    // Notification delivery can fail when the browser revokes permission or the document is closing.
+  }
+  scheduleDailyReminder();
+}
+
+function deliverMissedReminder() {
+  if (!appState?.notifications?.dailyEntry || !notificationsAvailable() || Notification.permission !== "granted") return;
+  const now = new Date();
+  if (now.getHours() >= ENTRY_REMINDER_HOUR && appState.notifications.lastDeliveredDate !== localDateString(now)) {
+    deliverDailyReminder();
+  }
+}
+
+async function enableDailyReminder() {
+  if (!notificationsAvailable()) {
+    showToast("Notifications are not available in this browser.");
+    return;
+  }
+  const permission = Notification.permission === "granted" ? "granted" : await Notification.requestPermission();
+  if (permission !== "granted") {
+    showToast("Allow notifications in your browser to enable the daily reminder.");
+    return;
+  }
+  appState.notifications.dailyEntry = true;
+  await saveVault();
+  renderApp();
+  showToast("Daily 21:00 reminder enabled.");
+}
+
+async function disableDailyReminder() {
+  appState.notifications.dailyEntry = false;
+  clearTimeout(reminderTimer);
+  reminderTimer = null;
+  await saveVault();
+  renderApp();
+  showToast("Daily reminder turned off.");
+}
+
+function pushNotificationsAvailable() {
+  return notificationsAvailable()
+    && "serviceWorker" in navigator
+    && "PushManager" in window;
+}
+
+function urlBase64ToUint8Array(value) {
+  const padding = "=".repeat((4 - (value.length % 4)) % 4);
+  const base64 = `${value.replaceAll("-", "+").replaceAll("_", "/")}${padding}`;
+  const raw = atob(base64);
+  return Uint8Array.from(raw, (character) => character.charCodeAt(0));
+}
+
+function createUuid() {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, "0"));
+  return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
+}
+
+function browserTimeZone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+
+function pushSubscriptionDetails(subscription) {
+  const details = subscription.toJSON();
+  if (!details?.endpoint || !details.keys?.p256dh || !details.keys?.auth) {
+    throw new Error("This browser did not return a complete push subscription.");
+  }
+  return {
+    endpoint: details.endpoint,
+    p256dh: details.keys.p256dh,
+    auth: details.keys.auth
+  };
+}
+
+async function savePushPublicKey(form) {
+  const publicKey = form.elements.vapidPublicKey.value.trim();
+  appState.notifications.vapidPublicKey = publicKey;
+  await saveVault({ markChanged: false, queue: false });
+  renderApp();
+  showToast(publicKey ? "VAPID public key saved." : "VAPID public key removed.");
+}
+
+async function enablePushNotifications() {
+  if (!pushNotificationsAvailable()) {
+    showToast("Push notifications are not available in this browser.");
+    return;
+  }
+  if (!supabaseConfigured() || !supabaseSignedIn()) {
+    showToast("Sign in to Supabase before enabling push reminders.");
+    return;
+  }
+  const publicKey = appState.notifications?.vapidPublicKey?.trim();
+  if (!publicKey) {
+    showToast("Save your VAPID public key first.");
+    return;
+  }
+
+  try {
+    const applicationServerKey = urlBase64ToUint8Array(publicKey);
+    if (applicationServerKey.length !== 65) throw new Error("Enter a valid VAPID public key.");
+    const permission = Notification.permission === "granted"
+      ? "granted"
+      : await Notification.requestPermission();
+    if (permission !== "granted") {
+      showToast("Allow notifications in your browser to enable push reminders.");
+      return;
+    }
+
+    await refreshSupabaseSession();
+    const registration = await navigator.serviceWorker.ready;
+    let subscription = await registration.pushManager.getSubscription();
+    if (!subscription) {
+      subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey
+      });
+    }
+    const details = pushSubscriptionDetails(subscription);
+    const id = appState.notifications.pushSubscriptionId || createUuid();
+    const user = appState.supabase.session.user;
+    await supabaseRequest(`/rest/v1/${PUSH_TABLE}?on_conflict=owner_id,endpoint`, {
+      method: "POST",
+      headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+      body: JSON.stringify({
+        id,
+        owner_id: user.id,
+        endpoint: details.endpoint,
+        p256dh: details.p256dh,
+        auth: details.auth,
+        timezone: browserTimeZone(),
+        updated_at: new Date().toISOString()
+      })
+    });
+    appState.notifications.pushEnabled = true;
+    appState.notifications.pushSubscriptionId = id;
+    await saveVault({ markChanged: false, queue: false });
+    renderApp();
+    showToast("Push reminders enabled for 21:00.");
+  } catch (error) {
+    showToast(error.message || "Push reminders could not be enabled.");
+  }
+}
+
+async function disablePushNotifications({ silent = false } = {}) {
+  const subscriptionId = appState.notifications?.pushSubscriptionId;
+  try {
+    if (pushNotificationsAvailable()) {
+      const registration = await navigator.serviceWorker.ready;
+      const subscription = await registration.pushManager.getSubscription();
+      if (subscription) await subscription.unsubscribe();
+    }
+    if (subscriptionId && supabaseConfigured() && supabaseSignedIn()) {
+      await supabaseRequest(`/rest/v1/${PUSH_TABLE}?id=eq.${encodeURIComponent(subscriptionId)}`, {
+        method: "DELETE"
+      });
+    }
+  } catch (error) {
+    if (!silent) {
+      showToast(error.message || "Push reminders could not be turned off.");
+      return;
+    }
+  }
+  appState.notifications.pushEnabled = false;
+  appState.notifications.pushSubscriptionId = null;
+  await saveVault({ markChanged: false, queue: false });
+  if (!silent) {
+    renderApp();
+    showToast("Push reminders turned off.");
+  }
 }
 
 function greeting() {
@@ -586,6 +953,8 @@ function renderApp() {
       </main>
       ${renderNav()}
     </div>`;
+  scheduleDailyReminder();
+  deliverMissedReminder();
 }
 
 function renderToday() {
@@ -658,17 +1027,19 @@ function renderToday() {
 }
 
 function renderMetricTile(id, label, value, iconName) {
-  return `<div class="metric-tile" id="metric-${id}"><span class="metric-tile-icon">${icon(iconName, 20)}</span><span class="metric-tile-label">${label}</span><strong class="metric-tile-value">${escapeHtml(value)}</strong></div>`;
+  return `<button class="metric-tile" id="metric-${id}" type="button" data-action="open-checkin" aria-label="Open today's ${escapeHtml(label)} entry"><span class="metric-tile-icon">${icon(iconName, 20)}</span><span class="metric-tile-label">${label}</span><strong class="metric-tile-value">${escapeHtml(value)}</strong></button>`;
 }
 
 function renderCalendar() {
   const year = calendarCursor.getFullYear();
   const month = calendarCursor.getMonth();
+  const today = localDateString(new Date());
+  const model = getPredictionModel();
+  const nextFertile = getNextFertileWindow(today);
   const firstDay = new Date(year, month, 1, 12).getDay();
   const daysInMonth = new Date(year, month + 1, 0, 12).getDate();
   const previousMonthDays = new Date(year, month, 0, 12).getDate();
   const cells = [];
-  const today = localDateString(new Date());
 
   for (let index = 0; index < 42; index += 1) {
     const dayNumber = index - firstDay + 1;
@@ -685,7 +1056,14 @@ function renderCalendar() {
     }
     const period = isPeriodDate(date);
     const predicted = !period && isPredictedPeriodDate(date);
-    cells.push(`<button class="day-cell ${outside ? "outside" : ""} ${date === today ? "today" : ""} ${period ? "period" : ""} ${predicted ? "predicted" : ""}" type="button" data-date="${date}" aria-label="${formatDate(date)}${period ? ", period logged" : predicted ? ", estimated period" : ""}">${parseDate(date).getDate()}${period || predicted ? '<span class="day-dot"></span>' : ""}</button>`);
+    const fertile = !period && !predicted && isPossibleFertileDate(date);
+    const marker = period || predicted
+      ? '<span class="day-dot"></span>'
+      : fertile
+        ? '<span class="day-dot fertile-dot"></span>'
+        : "";
+    const label = period ? ", period logged" : predicted ? ", estimated period" : fertile ? ", possible fertile window" : "";
+    cells.push(`<button class="day-cell ${outside ? "outside" : ""} ${date === today ? "today" : ""} ${period ? "period" : ""} ${predicted ? "predicted" : ""} ${fertile ? "fertile" : ""}" type="button" data-date="${date}" aria-label="${formatDate(date)}${label}">${parseDate(date).getDate()}${marker}</button>`);
   }
 
   const latest = getLatestPeriodStart(today);
@@ -708,12 +1086,14 @@ function renderCalendar() {
       <div class="legend">
         <span class="legend-item"><span class="legend-marker period-marker"></span>Logged period</span>
         <span class="legend-item"><span class="legend-marker predicted-marker"></span>Estimate</span>
+        <span class="legend-item"><span class="legend-marker fertile-marker"></span>Possible fertile window</span>
       </div>
     </section>
     <div class="section-heading"><h2>Cycle overview</h2></div>
     <section class="card card-pad overview-grid">
       <div class="stat-block"><span class="mini-label">Latest start</span><strong class="stat-value">${latest ? formatDate(latest, { month: "short", day: "numeric" }) : "Not logged"}</strong><span class="stat-detail">Tap a day to begin tracking.</span></div>
-      <div class="stat-block"><span class="mini-label">Next estimate</span><strong class="stat-value">${next ? formatDate(next, { month: "short", day: "numeric" }) : "Not available"}</strong><span class="stat-detail">Based on your cycle setting.</span></div>
+      <div class="stat-block"><span class="mini-label">Next estimate</span><strong class="stat-value">${next ? formatDate(next, { month: "short", day: "numeric" }) : "Not available"}</strong><span class="stat-detail">${model?.historyCount ? `Based on ${model.historyCount} completed cycle${model.historyCount === 1 ? "" : "s"}.` : "Based on your cycle setting after a start is logged."}</span></div>
+      <div class="stat-block"><span class="mini-label">Possible fertile window</span><strong class="stat-value">${nextFertile ? formatDateRange(nextFertile.fertileStart, nextFertile.fertileEnd) : "Not available"}</strong><span class="stat-detail">A calendar estimate, not contraception.</span></div>
     </section>`;
 }
 
@@ -832,6 +1212,44 @@ function renderSupabaseSettings() {
     </section>`;
 }
 
+function renderReminderSettings() {
+  const supported = notificationsAvailable();
+  const enabled = Boolean(appState.notifications?.dailyEntry && supported && Notification.permission === "granted");
+  const permission = supported ? Notification.permission : "unsupported";
+  const status = enabled ? "Enabled" : permission === "denied" ? "Blocked" : "Off";
+  const pushSupported = pushNotificationsAvailable();
+  const pushStored = Boolean(appState.notifications?.pushEnabled);
+  const pushPermission = pushSupported ? Notification.permission : "unsupported";
+  const pushSignedIn = supabaseConfigured() && supabaseSignedIn();
+  const pushPublicKey = appState.notifications?.vapidPublicKey || "";
+  const pushStatus = pushStored && pushPermission === "granted"
+    ? "Enabled"
+    : pushPermission === "denied"
+      ? "Blocked"
+      : !pushSupported
+        ? "Unavailable"
+        : !pushSignedIn
+          ? "Sign in required"
+          : !pushPublicKey
+            ? "Needs public key"
+            : "Off";
+  return `
+    <div class="section-heading"><h2>Daily reminder</h2></div>
+    <section class="card card-pad">
+      <div class="backup-row"><div><h3>Entry reminder</h3><p class="helper-text">At 21:00 each day: ${ENTRY_REMINDER_TEXT}</p></div><span class="status-chip ${enabled ? "strong" : ""}">${status}</span></div>
+      <div class="form-actions"><button class="${enabled ? "button-quiet" : "button-primary"}" type="button" data-action="${enabled ? "disable-reminder" : "enable-reminder"}" ${supported ? "" : "disabled"}>${enabled ? "Turn off reminder" : "Enable 21:00 reminder"}</button></div>
+      ${permission === "denied" ? '<p class="helper-text" style="margin-top:18px;">Notifications are blocked in your browser. Allow them in your browser settings, then try again.</p>' : !supported ? '<p class="helper-text" style="margin-top:18px;">This browser does not support reminders.</p>' : ""}
+      <div class="settings-divider" aria-hidden="true"></div>
+      <div class="backup-row"><div><h3>Push reminder</h3><p class="helper-text">Receive the same reminder even when Lotus is closed.</p></div><span class="status-chip ${pushStored && pushPermission === "granted" ? "strong" : ""}">${pushStatus}</span></div>
+      <form id="push-key-form" class="form-stack" style="margin-top:22px;">
+        <div class="form-field"><label class="field-label" for="push-vapid-public-key">VAPID public key</label><input class="text-input" id="push-vapid-public-key" name="vapidPublicKey" value="${escapeHtml(pushPublicKey)}" placeholder="Paste your public key" autocomplete="off" autocapitalize="off" spellcheck="false" ${pushStored ? "readonly" : ""} /><span class="helper-text">This public key identifies the push service. Keep the matching private key only in Supabase.</span></div>
+        <div class="form-actions"><button class="button-secondary" type="submit" ${pushStored ? "disabled" : ""}>Save public key ${icon("check", 18)}</button></div>
+      </form>
+      <div class="form-actions"><button class="${pushStored ? "button-quiet" : "button-primary"}" type="button" data-action="${pushStored ? "disable-push" : "enable-push"}" ${(!pushSupported || (!pushSignedIn && !pushStored) || (!pushPublicKey && !pushStored)) ? "disabled" : ""}>${pushStored ? "Turn off push reminders" : "Enable push reminders"}</button></div>
+      ${pushPermission === "denied" ? '<p class="helper-text" style="margin-top:18px;">Push permission is blocked in your browser. Allow notifications in browser settings, then turn push reminders on again.</p>' : !pushSupported ? '<p class="helper-text" style="margin-top:18px;">Push notifications need a supported browser and an installed or open PWA.</p>' : !pushSignedIn ? '<p class="helper-text" style="margin-top:18px;">Sign in to Supabase so Lotus can deliver reminders while the app is closed.</p>' : ""}
+    </section>`;
+}
+
 function renderSettings() {
   const lastBackup = appState.backup.lastBackupAt;
   return `
@@ -852,6 +1270,7 @@ function renderSettings() {
       </form>
     </section>
     ${renderSupabaseSettings()}
+    ${renderReminderSettings()}
     <div class="section-heading"><h2>Backup</h2></div>
     <section class="card card-pad backup-card">
       <h3>Encrypted JSON backup</h3>
@@ -918,6 +1337,8 @@ async function unlockAccount(form) {
 async function lockApp() {
   appState = null;
   currentPassword = null;
+  clearTimeout(reminderTimer);
+  reminderTimer = null;
   activeView = "today";
   renderUnlock();
 }
@@ -939,6 +1360,7 @@ async function startPeriod() {
     updatedAt: new Date().toISOString(),
     deletedAt: null
   };
+  recalculatePeriodStarts();
   await saveVault();
   showToast("Today is marked as the start of your period.");
   renderApp();
@@ -966,11 +1388,7 @@ async function saveCheckin(form) {
     updatedAt: new Date().toISOString(),
     deletedAt: null
   };
-  if (flow !== "none") {
-    const hasNearbyStart = appState.periodStarts.some((start) => start <= date && daysBetween(start, date) <= 10);
-    if (!hasNearbyStart) appState.periodStarts.push(date);
-    appState.periodStarts.sort();
-  }
+  recalculatePeriodStarts();
   await saveVault();
   activeView = "today";
   showToast("Check-in saved.");
@@ -997,6 +1415,7 @@ async function saveSupabaseConfig(form) {
     const parsed = new URL(url);
     if (!/^https?:$/.test(parsed.protocol) || !anonKey) throw new Error("Invalid connection");
     const changed = appState.supabase.url !== url || appState.supabase.anonKey !== anonKey;
+    if (changed && appState.notifications?.pushEnabled) await disablePushNotifications({ silent: true });
     appState.supabase.url = url;
     appState.supabase.anonKey = anonKey;
     if (changed) {
@@ -1048,6 +1467,7 @@ async function authenticateSupabase(form, action) {
 }
 
 async function signOutSupabase() {
+  if (appState.notifications?.pushEnabled) await disablePushNotifications({ silent: true });
   appState.supabase.session = null;
   appState.sync.enabled = false;
   appState.sync.mode = "local-first";
@@ -1173,6 +1593,10 @@ document.addEventListener("click", async (event) => {
     renderApp();
     return;
   }
+  if (actionName === "enable-reminder") return enableDailyReminder();
+  if (actionName === "disable-reminder") return disableDailyReminder();
+  if (actionName === "enable-push") return enablePushNotifications();
+  if (actionName === "disable-push") return disablePushNotifications();
   if (actionName === "export-backup") return exportBackup();
   if (actionName === "sync-now") return syncNow({ silent: false });
   if (actionName === "signout-supabase") return signOutSupabase();
@@ -1188,6 +1612,7 @@ document.addEventListener("submit", async (event) => {
     if (form.id === "settings-form") await saveSettings(form);
     if (form.id === "supabase-config-form") await saveSupabaseConfig(form);
     if (form.id === "supabase-auth-form") await authenticateSupabase(form, event.submitter?.value || "signin");
+    if (form.id === "push-key-form") await savePushPublicKey(form);
   } catch (error) {
     showToast("Lotus could not save that just now.");
   }
@@ -1202,6 +1627,13 @@ document.addEventListener("input", (event) => {
 
 document.addEventListener("change", async (event) => {
   if (event.target.dataset.action === "restore-backup") await restoreBackup(event.target);
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && appState) {
+    scheduleDailyReminder();
+    deliverMissedReminder();
+  }
 });
 
 async function boot() {
