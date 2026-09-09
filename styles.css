@@ -42,10 +42,11 @@ button {
   cursor: pointer;
 }
 
+a.brand-lockup:focus-visible,
 button:focus-visible,
 input:focus-visible,
 select:focus-visible {
-  outline: 3px solid var(--body);
+  outline: 3px dashed var(--brand);
   outline-offset: 3px;
 }
 
@@ -311,6 +312,11 @@ h3 {
   border: 0;
   background: var(--soft-brand);
   color: var(--body);
+}
+
+.supabase-sync-button {
+  min-height: 38px;
+  padding: 7px 12px;
 }
 
 .button-danger {
@@ -849,6 +855,13 @@ h3 {
   border-radius: 34px;
   background: var(--brand);
   box-shadow: 0 22px 60px rgba(255, 119, 119, 0.34);
+}
+
+.welcome-card button:focus-visible,
+.welcome-card input:focus-visible,
+.welcome-card select:focus-visible {
+  outline: 3px dashed var(--background);
+  outline-offset: 3px;
 }
 
 .welcome-icon {

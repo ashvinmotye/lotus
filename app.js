@@ -822,7 +822,7 @@ function renderSupabaseSettings() {
       </form>
       ${session ? `
         <div class="settings-row" style="margin-top:12px;"><div class="settings-row-copy"><span class="settings-row-title">Signed in as ${escapeHtml(session.user.email || "your Supabase account")}</span><span class="settings-row-detail">${appState.sync.remoteUpdatedAt ? `Last remote update: ${formatDate(localDateString(new Date(appState.sync.remoteUpdatedAt)), { month: "short", day: "numeric", year: "numeric" })}.` : "No remote vault has been created yet."}</span></div>${icon("check", 22)}</div>
-        <div class="form-actions"><button class="button-primary" type="button" data-action="sync-now">Sync now</button><button class="button-quiet" type="button" data-action="signout-supabase">Sign out</button></div>` : supabaseConfigured() ? `
+        <div class="form-actions"><button class="button-primary supabase-sync-button" type="button" data-action="sync-now">Sync now</button><button class="button-quiet" type="button" data-action="signout-supabase">Sign out</button></div>` : supabaseConfigured() ? `
         <form id="supabase-auth-form" class="form-stack" style="margin-top:22px;">
           <div class="form-field"><label class="field-label" for="supabase-email">Email</label><input class="text-input" id="supabase-email" name="email" type="email" autocomplete="email" required /></div>
           <div class="form-field"><label class="field-label" for="supabase-password">Supabase password</label><input class="text-input" id="supabase-password" name="password" type="password" autocomplete="current-password" minlength="6" required /></div>
