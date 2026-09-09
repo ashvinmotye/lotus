@@ -105,6 +105,12 @@ function numberOrNull(value) {
   return Number.isFinite(number) ? number : null;
 }
 
+function timestampsMatch(first, second) {
+  const firstTime = Date.parse(first || "");
+  const secondTime = Date.parse(second || "");
+  return Number.isFinite(firstTime) && Number.isFinite(secondTime) && firstTime === secondTime;
+}
+
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
@@ -253,7 +259,8 @@ function defaultState(name) {
       localChangedAt: null,
       lastPushedAt: null,
       lastPulledAt: null,
-      remoteUpdatedAt: null
+      remoteUpdatedAt: null,
+      remoteRevision: null
     },
     supabase: {
       url: "",
@@ -315,7 +322,8 @@ function normaliseState(state) {
       localChangedAt: state.sync?.localChangedAt || null,
       lastPushedAt: state.sync?.lastPushedAt || null,
       lastPulledAt: state.sync?.lastPulledAt || null,
-      remoteUpdatedAt: state.sync?.remoteUpdatedAt || null
+      remoteUpdatedAt: state.sync?.remoteUpdatedAt || null,
+      remoteRevision: numberOrNull(state.sync?.remoteRevision)
     },
     supabase: {
       url: state.supabase?.url || "",
@@ -428,10 +436,11 @@ async function pushRemoteVault() {
   if (!user) throw new Error("No Supabase user is signed in.");
   const encrypted = await encryptState(syncSafeState(), currentPassword);
   const updatedAt = new Date().toISOString();
+  const revision = Math.max(Date.now(), (numberOrNull(appState.sync.remoteRevision) || 0) + 1);
   const row = {
     id: "vault",
     owner_id: user.id,
-    revision: Date.now(),
+    revision,
     updated_at: updatedAt,
     salt: encrypted.salt,
     iv: encrypted.iv,
@@ -448,6 +457,7 @@ async function pushRemoteVault() {
   appState.sync.lastPushedAt = updatedAt;
   appState.sync.lastPulledAt = updatedAt;
   appState.sync.remoteUpdatedAt = updatedAt;
+  appState.sync.remoteRevision = revision;
   await saveVault({ markChanged: false, queue: false });
 }
 
@@ -471,7 +481,8 @@ async function applyRemoteVault(row) {
     status: "synced",
     localChangedAt: null,
     lastPulledAt: row.updated_at,
-    remoteUpdatedAt: row.updated_at
+    remoteUpdatedAt: row.updated_at,
+    remoteRevision: numberOrNull(row.revision)
   };
   await saveVault({ markChanged: false, queue: false });
 }
@@ -492,15 +503,22 @@ async function syncNow({ silent = false } = {}) {
     if (!remote) {
       await pushRemoteVault();
     } else {
-      const remoteIsNew = remote.updated_at !== appState.sync.remoteUpdatedAt;
+      const remoteRevision = numberOrNull(remote.revision);
+      const knownRemoteRevision = numberOrNull(appState.sync.remoteRevision);
+      const sameRemoteMoment = timestampsMatch(remote.updated_at, appState.sync.remoteUpdatedAt);
+      const remoteIsNew = knownRemoteRevision !== null && remoteRevision !== null
+        ? remoteRevision !== knownRemoteRevision
+        : !sameRemoteMoment;
+      if (knownRemoteRevision === null && remoteRevision !== null && sameRemoteMoment) {
+        appState.sync.remoteRevision = remoteRevision;
+      }
       const localChangedAt = appState.sync.localChangedAt;
       const localUnsynced = Boolean(localChangedAt && (!appState.sync.lastPushedAt || Date.parse(localChangedAt) > Date.parse(appState.sync.lastPushedAt)));
-      const remoteIsNewer = remoteIsNew && (!localChangedAt || Date.parse(remote.updated_at) > Date.parse(localChangedAt));
       if (localUnsynced && remoteIsNew) {
         const useRemote = window.confirm("Lotus found a newer encrypted version on another device. Choose OK to use it, or Cancel to keep this device's data.");
         if (useRemote) await applyRemoteVault(remote);
         else await pushRemoteVault();
-      } else if (remoteIsNewer) {
+      } else if (remoteIsNew) {
         await applyRemoteVault(remote);
       } else if (localUnsynced || !appState.sync.remoteUpdatedAt) {
         await pushRemoteVault();
@@ -1424,6 +1442,7 @@ async function saveSupabaseConfig(form) {
       appState.sync.mode = "local-first";
       appState.sync.status = "local";
       appState.sync.remoteUpdatedAt = null;
+      appState.sync.remoteRevision = null;
       appState.sync.lastPushedAt = null;
       appState.sync.lastPulledAt = null;
     }
