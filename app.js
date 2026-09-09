@@ -857,8 +857,8 @@ function renderSettings() {
       <h3>Encrypted JSON backup</h3>
       <p class="helper-text" style="margin-top:8px;">Backups contain encrypted data. You will need this same master password to restore them.</p>
       <div class="settings-list" style="margin-top:12px;">
-        <div class="settings-row"><div class="settings-row-copy"><span class="settings-row-title">Last backup</span><span class="settings-row-detail">${lastBackup ? formatDate(localDateString(new Date(lastBackup)), { month: "long", day: "numeric", year: "numeric" }) : "Not yet backed up"}</span></div><button class="button-quiet" type="button" data-action="export-backup">${icon("download", 17)} Export</button></div>
-        <div class="settings-row"><div class="settings-row-copy"><span class="settings-row-title">Restore a backup</span><span class="settings-row-detail">This replaces the data currently on this device.</span></div><label class="button-quiet" for="restore-file">${icon("upload", 17)} Choose file</label><input class="screen-reader-only" id="restore-file" type="file" accept="application/json,.json" data-action="restore-backup" /></div>
+        <div class="settings-row backup-setting-row"><div class="settings-row-copy"><span class="settings-row-title">Last backup</span><span class="settings-row-detail">${lastBackup ? formatDate(localDateString(new Date(lastBackup)), { month: "long", day: "numeric", year: "numeric" }) : "Not yet backed up"}</span></div><button class="button-quiet" type="button" data-action="export-backup">${icon("download", 17)} Export</button></div>
+        <div class="settings-row backup-setting-row"><div class="settings-row-copy"><span class="settings-row-title">Restore a backup</span><span class="settings-row-detail">This replaces the data currently on this device.</span></div><label class="button-quiet" for="restore-file">${icon("upload", 17)} Choose file</label><input class="screen-reader-only" id="restore-file" type="file" accept="application/json,.json" data-action="restore-backup" /></div>
       </div>
     </section>
     <div class="section-heading"><h2>Privacy</h2></div>

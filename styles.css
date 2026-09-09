@@ -816,6 +816,19 @@ h3 {
   min-width: 0;
 }
 
+.backup-setting-row {
+  display: grid;
+  grid-template-columns: 1fr;
+  align-items: start;
+  gap: 14px;
+  width: 100%;
+}
+
+.backup-setting-row .button-quiet {
+  justify-self: end;
+  white-space: nowrap;
+}
+
 .settings-row-title {
   display: block;
   font-weight: 400;
