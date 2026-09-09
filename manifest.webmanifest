@@ -1,0 +1,23 @@
+{
+  "name": "Lotus",
+  "short_name": "Lotus",
+  "description": "A calm, private period and wellbeing tracker.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#FFE0E0",
+  "theme_color": "#FF7777",
+  "icons": [
+    {
+      "src": "./assets/lotus-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./assets/lotus-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
