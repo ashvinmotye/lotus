@@ -37,6 +37,35 @@ const SCALE_OPTIONS = [
   [4, "High"],
   [5, "Very high"]
 ];
+const SORENESS_OPTIONS = [
+  ["none", "None"],
+  ["mild", "Mild"],
+  ["strong", "Strong"]
+];
+const PAIN_IMPACT_OPTIONS = [
+  ["none", "None"],
+  ["normal", "Continued normally"],
+  ["reduced", "Reduced activities"],
+  ["unable", "Unable"]
+];
+const CLOT_SIZE_OPTIONS = [
+  ["none", "None"],
+  ["small", "Under 2.5 cm"],
+  ["large", "2.5 cm or larger"]
+];
+const PRODUCT_CHANGE_OPTIONS = [
+  ["not-tracked", "Not tracked"],
+  ["4-plus", "4 hours or longer"],
+  ["2-to-4", "2–4 hours"],
+  ["1-to-2", "1–2 hours"],
+  ["under-1", "Under 1 hour"]
+];
+const MOOD_OPTIONS = [
+  ["none", "None"],
+  ["mild", "Mild"],
+  ["moderate", "Moderate"],
+  ["severe", "Severe"]
+];
 const EXERCISE_OPTIONS = [
   ["none", "None"],
   ["gentle", "Gentle"],
@@ -105,6 +134,14 @@ function numberOrNull(value) {
   return Number.isFinite(number) ? number : null;
 }
 
+function validChoice(options, value, fallback = null) {
+  return options.find(([optionValue]) => String(optionValue) === String(value))?.[0] ?? fallback;
+}
+
+function choiceLabel(options, value, fallback = "Not logged") {
+  return options.find(([optionValue]) => String(optionValue) === String(value))?.[1] || fallback;
+}
+
 function timestampsMatch(first, second) {
   const firstTime = Date.parse(first || "");
   const secondTime = Date.parse(second || "");
@@ -135,6 +172,9 @@ function icon(name, size = 20) {
     exercise: '<path d="M6 9v6M3.8 10v4M18 9v6M20.2 10v4M6 12h12"/>',
     stress: '<path d="M4 12h3l2-5 3 10 2-5h4"/>',
     heart: '<path d="M20.5 8.8c0 5.3-8.5 9.7-8.5 9.7S3.5 14.1 3.5 8.8A4.3 4.3 0 0 1 12 7a4.3 4.3 0 0 1 8.5 1.8Z"/>',
+    soreness: '<circle cx="12" cy="12" r="7.5"/><path d="M12 8.5v7M8.5 12h7"/>',
+    pain: '<path d="m13.5 2.8-7 10h5l-1 8.4 7-11h-5l1-7.4Z"/>',
+    mood: '<circle cx="12" cy="12" r="8.5"/><path d="M8.7 10h.1M15.2 10h.1M8.5 15c1-.8 2.2-1.2 3.5-1.2s2.5.4 3.5 1.2"/>',
     check: '<path d="m5 12 4.2 4.2L19 6.5"/>',
     download: '<path d="M12 4v10M8 10l4 4 4-4M5 19.5h14"/>',
     upload: '<path d="M12 14V4M8 8l4-4 4 4M5 19.5h14"/>',
@@ -295,6 +335,38 @@ function normaliseState(state) {
   Object.values(dailyLogs).forEach((log) => {
     log.exercise = log.exercise || { type: "none", minutes: 0 };
     log.symptoms = Array.isArray(log.symptoms) ? log.symptoms : [];
+    log.breastSoreness = validChoice(SORENESS_OPTIONS, log.breastSoreness);
+
+    const pain = log.periodPain;
+    if (pain && typeof pain === "object") {
+      const intensity = numberOrNull(pain.intensity);
+      log.periodPain = {
+        intensity: intensity === null ? 0 : clamp(intensity, 0, 10),
+        impact: validChoice(PAIN_IMPACT_OPTIONS, pain.impact, "none")
+      };
+    } else {
+      log.periodPain = null;
+    }
+
+    const bleeding = log.bleedingImpact;
+    log.bleedingImpact = bleeding && typeof bleeding === "object"
+      ? {
+          flooding: Boolean(bleeding.flooding),
+          productChangeInterval: validChoice(PRODUCT_CHANGE_OPTIONS, bleeding.productChangeInterval, "not-tracked"),
+          clotSize: validChoice(CLOT_SIZE_OPTIONS, bleeding.clotSize, "none"),
+          activityImpact: Boolean(bleeding.activityImpact)
+        }
+      : null;
+
+    const mood = log.moodPms;
+    log.moodPms = mood && typeof mood === "object"
+      ? {
+          lowMood: validChoice(MOOD_OPTIONS, mood.lowMood, "none"),
+          anxiety: validChoice(MOOD_OPTIONS, mood.anxiety, "none"),
+          irritability: validChoice(MOOD_OPTIONS, mood.irritability, "none"),
+          impact: validChoice(MOOD_OPTIONS, mood.impact, "none")
+        }
+      : null;
   });
   return {
     schemaVersion: state.schemaVersion || 1,
@@ -896,6 +968,37 @@ function renderChoiceGroup(group, options, selected, details = false) {
     </button>`).join("");
 }
 
+function renderSeverityRow(label, group, selected) {
+  return `<div class="severity-row"><span class="subfield-label">${escapeHtml(label)}</span><div class="segmented-control four" role="group" aria-label="${escapeHtml(label)} severity">${renderChoiceGroup(group, MOOD_OPTIONS, selected)}</div></div>`;
+}
+
+function formatBleedingImpact(bleeding) {
+  if (!bleeding) return "Not logged";
+  if (bleeding.activityImpact) return "Affected activities";
+  if (bleeding.flooding) return "Flooding or leakage";
+  if (bleeding.productChangeInterval && bleeding.productChangeInterval !== "not-tracked") {
+    const changeLabels = {
+      "4-plus": "Changes 4+ hours apart",
+      "2-to-4": "Changes 2–4 hours apart",
+      "1-to-2": "Changes 1–2 hours apart",
+      "under-1": "Changes under 1 hour apart"
+    };
+    return changeLabels[bleeding.productChangeInterval] || "Change timing saved";
+  }
+  if (bleeding.clotSize === "large") return "Larger clots";
+  if (bleeding.clotSize === "small") return "Smaller clots";
+  return "No impact";
+}
+
+function formatMoodPms(mood) {
+  if (!mood) return "Not logged";
+  const rank = { none: 0, mild: 1, moderate: 2, severe: 3 };
+  const highest = [mood.lowMood, mood.anxiety, mood.irritability, mood.impact]
+    .filter((value) => Object.prototype.hasOwnProperty.call(rank, value))
+    .sort((first, second) => rank[second] - rank[first])[0] || "none";
+  return choiceLabel(MOOD_OPTIONS, highest, "None");
+}
+
 function renderOnboarding(error = "") {
   appRoot.innerHTML = `
     <div class="onboarding">
@@ -994,6 +1097,12 @@ function renderToday() {
   const stress = log?.stress ? `${log.stress}/5` : "Not logged";
   const sexDrive = log?.sexDrive ? `${log.sexDrive}/5` : "Not logged";
   const water = `${log?.water || 0}/${WATER_GOAL}`;
+  const breastSoreness = log?.breastSoreness ? choiceLabel(SORENESS_OPTIONS, log.breastSoreness) : "Not logged";
+  const periodPain = log?.periodPain
+    ? `${log.periodPain.intensity}/10${log.periodPain.impact === "unable" ? " · Unable" : log.periodPain.impact === "reduced" ? " · Reduced" : ""}`
+    : "Not logged";
+  const bleedingImpact = formatBleedingImpact(log?.bleedingImpact);
+  const moodPms = formatMoodPms(log?.moodPms);
 
   return `
     <div class="page-heading">
@@ -1031,6 +1140,10 @@ function renderToday() {
         ${renderMetricTile("stress", "Stress", stress, "stress")}
         ${renderMetricTile("sex-drive", "Sex drive", sexDrive, "heart")}
         ${renderMetricTile("exercise", "Exercise", exercise, "exercise")}
+        ${renderMetricTile("soreness", "Soreness", breastSoreness, "soreness")}
+        ${renderMetricTile("period-pain", "Period pain", periodPain, "pain")}
+        ${renderMetricTile("bleeding-impact", "Bleeding impact", bleedingImpact, "drop")}
+        ${renderMetricTile("mood-pms", "Mood & PMS", moodPms, "mood")}
       </div>
     </section>
 
@@ -1119,6 +1232,15 @@ function renderCheckin() {
   const log = getLog(selectedDate) || {};
   const exercise = log.exercise || { type: "none", minutes: 0 };
   const water = clamp(Number(log.water) || 0, 0, 20);
+  const breastSoreness = validChoice(SORENESS_OPTIONS, log.breastSoreness, "none");
+  const periodPain = log.periodPain || { intensity: 0, impact: "none" };
+  const bleeding = log.bleedingImpact || {
+    flooding: false,
+    productChangeInterval: "not-tracked",
+    clotSize: "none",
+    activityImpact: false
+  };
+  const mood = log.moodPms || { lowMood: "none", anxiety: "none", irritability: "none", impact: "none" };
   return `
     <div class="page-heading">
       <div>
@@ -1131,15 +1253,52 @@ function renderCheckin() {
         <div><span class="mini-label">Selected day</span><p class="date-line">${formatDate(selectedDate)}</p></div>
         <button class="button-quiet" type="button" data-action="today-date">Today</button>
       </div>
-      <form id="checkin-form" class="form-stack" data-flow="${log.flow || "none"}" data-stress="${log.stress || ""}" data-sex-drive="${log.sexDrive || ""}" data-exercise="${exercise.type || "none"}" data-water="${water}">
+      <form id="checkin-form" class="form-stack" data-flow="${log.flow || "none"}" data-breast-soreness="${breastSoreness}" data-pain-impact="${periodPain.impact || "none"}" data-clot-size="${bleeding.clotSize || "none"}" data-mood-low="${mood.lowMood || "none"}" data-mood-anxiety="${mood.anxiety || "none"}" data-mood-irritability="${mood.irritability || "none"}" data-mood-impact="${mood.impact || "none"}" data-stress="${log.stress || ""}" data-sex-drive="${log.sexDrive || ""}" data-exercise="${exercise.type || "none"}" data-water="${water}">
         <input type="hidden" name="date" value="${selectedDate}" />
         <div class="form-field">
           <span class="field-label">Period flow</span>
           <div class="segmented-control" role="group" aria-label="Period flow">${renderChoiceGroup("flow", FLOW_OPTIONS, log.flow || "none")}</div>
         </div>
+        <div class="form-field measurement-field">
+          <span class="field-label">Bleeding impact</span>
+          <span class="helper-text">Add details that describe how bleeding affected your day.</span>
+          <div class="symptom-grid">
+            <div class="check-option"><input id="bleeding-flooding" type="checkbox" name="bleeding-flooding" ${bleeding.flooding ? "checked" : ""} /><label for="bleeding-flooding">Flooding or leakage</label></div>
+            <div class="check-option"><input id="bleeding-activity-impact" type="checkbox" name="bleeding-activity-impact" ${bleeding.activityImpact ? "checked" : ""} /><label for="bleeding-activity-impact">Affected daily activities</label></div>
+          </div>
+          <label class="subfield-label" for="product-change-interval">Shortest time between product changes</label>
+          <select class="select-input" id="product-change-interval" name="product-change-interval">${PRODUCT_CHANGE_OPTIONS.map(([value, label]) => `<option value="${value}" ${bleeding.productChangeInterval === value ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select>
+          <span class="subfield-label">Largest clot</span>
+          <div class="segmented-control three" role="group" aria-label="Largest blood clot">${renderChoiceGroup("clot-size", CLOT_SIZE_OPTIONS, bleeding.clotSize || "none")}</div>
+        </div>
         <div class="form-field">
           <span class="field-label">Symptoms</span>
           <div class="symptom-grid">${SYMPTOMS.map((symptom) => `<div class="check-option"><input id="symptom-${symptom.toLowerCase().replaceAll(" ", "-")}" type="checkbox" name="symptoms" value="${escapeHtml(symptom)}" ${log.symptoms?.includes(symptom) ? "checked" : ""} /><label for="symptom-${symptom.toLowerCase().replaceAll(" ", "-")}">${escapeHtml(symptom)}</label></div>`).join("")}</div>
+        </div>
+        <div class="form-field measurement-field">
+          <span class="field-label">Breast soreness</span>
+          <div class="segmented-control three" role="group" aria-label="Breast soreness">${renderChoiceGroup("breast-soreness", SORENESS_OPTIONS, breastSoreness)}</div>
+        </div>
+        <div class="form-field measurement-field">
+          <span class="field-label">Period pain</span>
+          <label class="subfield-label" for="period-pain-intensity">Worst intensity today</label>
+          <div class="range-row">
+            <input class="range-input" id="period-pain-intensity" name="period-pain-intensity" type="range" min="0" max="10" step="1" value="${clamp(Number(periodPain.intensity) || 0, 0, 10)}" aria-label="Period pain intensity from 0 to 10" />
+            <output class="range-value" id="period-pain-value" for="period-pain-intensity">${clamp(Number(periodPain.intensity) || 0, 0, 10)} / 10</output>
+          </div>
+          <span class="helper-text">0 is no pain. 10 is the worst pain imaginable.</span>
+          <span class="subfield-label">Effect on daily activities</span>
+          <div class="segmented-control four impact-control" role="group" aria-label="Effect of period pain on daily activities">${renderChoiceGroup("pain-impact", PAIN_IMPACT_OPTIONS, periodPain.impact || "none")}</div>
+        </div>
+        <div class="form-field measurement-field">
+          <span class="field-label">Mood &amp; PMS</span>
+          <span class="helper-text">Rate how each felt today.</span>
+          <div class="severity-list">
+            ${renderSeverityRow("Low mood", "mood-low", mood.lowMood || "none")}
+            ${renderSeverityRow("Anxiety", "mood-anxiety", mood.anxiety || "none")}
+            ${renderSeverityRow("Irritability", "mood-irritability", mood.irritability || "none")}
+            ${renderSeverityRow("Daily-life impact", "mood-impact", mood.impact || "none")}
+          </div>
         </div>
         <div class="form-field">
           <span class="field-label">Stress</span>
@@ -1371,6 +1530,10 @@ async function startPeriod() {
     date: today,
     flow: appState.dailyLogs[today]?.flow && appState.dailyLogs[today].flow !== "none" ? appState.dailyLogs[today].flow : "medium",
     symptoms: appState.dailyLogs[today]?.symptoms || [],
+    breastSoreness: appState.dailyLogs[today]?.breastSoreness || null,
+    periodPain: appState.dailyLogs[today]?.periodPain || null,
+    bleedingImpact: appState.dailyLogs[today]?.bleedingImpact || null,
+    moodPms: appState.dailyLogs[today]?.moodPms || null,
     stress: appState.dailyLogs[today]?.stress || null,
     sexDrive: appState.dailyLogs[today]?.sexDrive || null,
     exercise: appState.dailyLogs[today]?.exercise || { type: "none", minutes: 0 },
@@ -1389,6 +1552,23 @@ async function saveCheckin(form) {
   const existing = appState.dailyLogs[date] || {};
   const flow = form.dataset.flow || "none";
   const symptoms = [...form.querySelectorAll('input[name="symptoms"]:checked')].map((input) => input.value);
+  const breastSoreness = validChoice(SORENESS_OPTIONS, form.dataset.breastSoreness, "none");
+  const periodPainIntensity = clamp(Number(form.elements["period-pain-intensity"].value) || 0, 0, 10);
+  const periodPainImpact = periodPainIntensity === 0
+    ? "none"
+    : validChoice(PAIN_IMPACT_OPTIONS, form.dataset.painImpact, "none");
+  const bleedingImpact = {
+    flooding: Boolean(form.elements["bleeding-flooding"].checked),
+    productChangeInterval: validChoice(PRODUCT_CHANGE_OPTIONS, form.elements["product-change-interval"].value, "not-tracked"),
+    clotSize: validChoice(CLOT_SIZE_OPTIONS, form.dataset.clotSize, "none"),
+    activityImpact: Boolean(form.elements["bleeding-activity-impact"].checked)
+  };
+  const moodPms = {
+    lowMood: validChoice(MOOD_OPTIONS, form.dataset.moodLow, "none"),
+    anxiety: validChoice(MOOD_OPTIONS, form.dataset.moodAnxiety, "none"),
+    irritability: validChoice(MOOD_OPTIONS, form.dataset.moodIrritability, "none"),
+    impact: validChoice(MOOD_OPTIONS, form.dataset.moodImpact, "none")
+  };
   const stress = numberOrNull(form.dataset.stress);
   const sexDrive = numberOrNull(form.dataset.sexDrive);
   const exerciseType = form.dataset.exercise || "none";
@@ -1399,6 +1579,10 @@ async function saveCheckin(form) {
     date,
     flow,
     symptoms,
+    breastSoreness,
+    periodPain: { intensity: periodPainIntensity, impact: periodPainImpact },
+    bleedingImpact,
+    moodPms,
     stress,
     sexDrive,
     exercise: { type: exerciseType, minutes: exerciseMinutes },
@@ -1642,6 +1826,10 @@ document.addEventListener("input", (event) => {
   if (event.target.id === "exercise-minutes") {
     const value = $("#exercise-minutes-value");
     if (value) value.textContent = event.target.value;
+  }
+  if (event.target.id === "period-pain-intensity") {
+    const value = $("#period-pain-value");
+    if (value) value.textContent = `${event.target.value} / 10`;
   }
 });
 

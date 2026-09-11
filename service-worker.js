@@ -1,4 +1,4 @@
-const CACHE_NAME = "lotus-shell-v9";
+const CACHE_NAME = "lotus-shell-v10";
 const REMINDER_TEXT = "Take some time to pause and reflect.";
 const APP_SHELL = [
   "./",

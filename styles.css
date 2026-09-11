@@ -675,6 +675,10 @@ h3 {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.segmented-control.four {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .segment-button {
   min-height: 46px;
   padding: 8px 5px;
@@ -698,6 +702,43 @@ h3 {
   margin-top: 3px;
   font-size: 0.68rem;
   font-weight: 300;
+}
+
+.measurement-field {
+  padding: 18px;
+  border-radius: 20px;
+  background: var(--soft-brand);
+}
+
+.measurement-field .segment-button,
+.measurement-field .check-option label,
+.measurement-field .select-input {
+  background: var(--background);
+}
+
+.measurement-field .segment-button.selected,
+.measurement-field .check-option input:checked + label {
+  background: var(--brand);
+}
+
+.subfield-label {
+  display: block;
+  font-size: 0.82rem;
+  font-weight: 400;
+}
+
+.severity-list,
+.severity-row {
+  display: grid;
+  gap: 9px;
+}
+
+.severity-list {
+  gap: 16px;
+}
+
+.impact-control .segment-button {
+  min-height: 58px;
 }
 
 .symptom-grid,
@@ -1164,6 +1205,14 @@ h3 {
 
   .segmented-control {
     gap: 4px;
+  }
+
+  .segmented-control.four {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .measurement-field {
+    padding: 14px;
   }
 
   .segment-button {
