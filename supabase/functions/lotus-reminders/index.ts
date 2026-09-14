@@ -27,10 +27,10 @@ function getRequiredSecret(name: string) {
   return value;
 }
 
-function isAuthorized(request: Request, serviceRoleKey: string) {
-  const authorization = request.headers.get("authorization") || "";
-  const bearer = authorization.replace(/^Bearer\s+/i, "");
-  return bearer === serviceRoleKey || request.headers.get("apikey") === serviceRoleKey;
+function isAuthorized(request: Request) {
+  const expected = getRequiredSecret("LOTUS_CRON_SECRET");
+  const received = request.headers.get("x-cron-secret") || "";
+  return received === expected;
 }
 
 async function supabaseRest(path: string, options: RequestInit = {}) {
@@ -95,8 +95,7 @@ Deno.serve(async (request) => {
   if (request.method === "OPTIONS") return new Response("ok");
 
   try {
-    const serviceRoleKey = getRequiredSecret("SUPABASE_SERVICE_ROLE_KEY");
-    if (!isAuthorized(request, serviceRoleKey)) return json({ error: "Unauthorized" }, 401);
+    if (!isAuthorized(request)) return json({ error: "Unauthorized" }, 401);
 
     const vapidPublicKey = getRequiredSecret("LOTUS_VAPID_PUBLIC_KEY");
     const vapidPrivateKey = getRequiredSecret("LOTUS_VAPID_PRIVATE_KEY");

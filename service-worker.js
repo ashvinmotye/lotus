@@ -1,9 +1,10 @@
-const CACHE_NAME = "lotus-shell-v10";
+const CACHE_NAME = "lotus-shell-v12";
 const REMINDER_TEXT = "Take some time to pause and reflect.";
 const APP_SHELL = [
   "./",
   "./index.html",
   "./styles.css",
+  "./config.js",
   "./app.js",
   "./manifest.webmanifest",
   "./assets/lotus.svg",

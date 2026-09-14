@@ -82,8 +82,10 @@ grant select, insert, update, delete on table public.q4n8 to authenticated;
 
 -- Push delivery setup is intentionally completed in the Supabase Dashboard:
 -- 1. Deploy supabase/functions/lotus-reminders/index.ts as lotus-reminders.
--- 2. Add LOTUS_VAPID_PUBLIC_KEY, LOTUS_VAPID_PRIVATE_KEY, and
---    LOTUS_VAPID_SUBJECT as Edge Function secrets. Never put the private key
---    in Lotus or in this SQL file.
--- 3. Schedule lotus-reminders every 15 minutes. The function sends once per
+-- 2. Add LOTUS_VAPID_PUBLIC_KEY, LOTUS_VAPID_PRIVATE_KEY,
+--    LOTUS_VAPID_SUBJECT, and LOTUS_CRON_SECRET as Edge Function secrets.
+--    Never put private keys in Lotus or in this SQL file.
+-- 3. Store the same LOTUS_CRON_SECRET value in Supabase Vault under the name
+--    lotus_cron_secret so scheduled calls can authenticate.
+-- 4. Schedule lotus-reminders every 15 minutes. The function sends once per
 --    subscription on its local day when the local hour is 21.

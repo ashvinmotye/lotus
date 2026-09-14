@@ -45,7 +45,8 @@ button {
 a.brand-lockup:focus-visible,
 button:focus-visible,
 input:focus-visible,
-select:focus-visible {
+select:focus-visible,
+summary:focus-visible {
   outline: 3px dashed var(--brand);
   outline-offset: 3px;
 }
@@ -915,6 +916,37 @@ h3 {
   opacity: 0.72;
 }
 
+.settings-guidance {
+  margin-top: 18px;
+}
+
+.reminder-facts {
+  display: grid;
+  gap: 10px;
+  margin-top: 22px;
+}
+
+.reminder-facts > div {
+  min-width: 0;
+  padding: 14px;
+  border-radius: 18px;
+  background: var(--soft-brand);
+}
+
+.reminder-facts .mini-label {
+  margin-bottom: 5px;
+}
+
+.reminder-facts span:last-child {
+  display: block;
+  overflow-wrap: anywhere;
+  font-size: 0.88rem;
+}
+
+.reminder-actions {
+  gap: 10px;
+}
+
 .backup-card {
   border: 0;
   background: var(--soft-brand);
@@ -1109,6 +1141,10 @@ h3 {
 
   .symptom-grid,
   .exercise-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .reminder-facts {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 

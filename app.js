@@ -1,4 +1,9 @@
 const appRoot = document.getElementById("app");
+const LOTUS_DEPLOYMENT = Object.freeze({
+  supabaseUrl: String(window.LOTUS_CONFIG?.LOTUS_SUPABASE_URL || "").trim().replace(/\/+$/, ""),
+  supabaseAnonKey: String(window.LOTUS_CONFIG?.LOTUS_SUPABASE_ANON_KEY || "").trim(),
+  vapidPublicKey: String(window.LOTUS_CONFIG?.LOTUS_VAPID_PUBLIC_KEY || "").trim()
+});
 const DB_NAME = "lotus-local-vault";
 const STORE_NAME = "encrypted-vault";
 const VAULT_KEY = "primary";
@@ -7,7 +12,6 @@ const PUSH_TABLE = "q4n8";
 const PBKDF2_ITERATIONS = 150000;
 const WATER_GOAL = 8;
 const ENTRY_REMINDER_TEXT = "Take some time to pause and reflect.";
-const ENTRY_REMINDER_HOUR = 21;
 const FERTILE_WINDOW_DAYS = 5;
 // Sohda et al. (JMIR 2017;19:e391) model the follicular phase as a linear
 // function of the mean of the user's recent cycle lengths. These are their
@@ -81,7 +85,6 @@ let selectedDate = localDateString(new Date());
 let calendarCursor = new Date();
 let toastTimer = null;
 let syncTimer = null;
-let reminderTimer = null;
 
 function $(selector, parent = document) {
   return parent.querySelector(selector);
@@ -285,11 +288,8 @@ function defaultState(name) {
     dailyLogs: {},
     backup: { lastBackupAt: null },
     notifications: {
-      dailyEntry: false,
-      lastDeliveredDate: null,
       pushEnabled: false,
-      pushSubscriptionId: null,
-      vapidPublicKey: ""
+      pushSubscriptionId: null
     },
     sync: {
       mode: "local-first",
@@ -303,8 +303,6 @@ function defaultState(name) {
       remoteRevision: null
     },
     supabase: {
-      url: "",
-      anonKey: "",
       session: null
     }
   };
@@ -380,11 +378,8 @@ function normaliseState(state) {
     dailyLogs,
     backup: { lastBackupAt: state.backup?.lastBackupAt || null },
     notifications: {
-      dailyEntry: Boolean(state.notifications?.dailyEntry),
-      lastDeliveredDate: state.notifications?.lastDeliveredDate || null,
       pushEnabled: Boolean(state.notifications?.pushEnabled),
-      pushSubscriptionId: state.notifications?.pushSubscriptionId || null,
-      vapidPublicKey: state.notifications?.vapidPublicKey || ""
+      pushSubscriptionId: state.notifications?.pushSubscriptionId || null
     },
     sync: {
       mode: state.sync?.mode || "local-first",
@@ -398,8 +393,6 @@ function normaliseState(state) {
       remoteRevision: numberOrNull(state.sync?.remoteRevision)
     },
     supabase: {
-      url: state.supabase?.url || "",
-      anonKey: state.supabase?.anonKey || "",
       session: state.supabase?.session || null
     }
   };
@@ -416,7 +409,7 @@ async function saveVault({ markChanged = true, queue = true } = {}) {
 }
 
 function supabaseConfigured() {
-  return Boolean(appState?.supabase?.url && appState?.supabase?.anonKey);
+  return Boolean(LOTUS_DEPLOYMENT.supabaseUrl && LOTUS_DEPLOYMENT.supabaseAnonKey);
 }
 
 function supabaseSignedIn() {
@@ -424,13 +417,13 @@ function supabaseSignedIn() {
 }
 
 function supabaseBaseUrl() {
-  return (appState.supabase.url || "").replace(/\/+$/, "");
+  return LOTUS_DEPLOYMENT.supabaseUrl;
 }
 
 async function supabaseRequest(path, options = {}) {
   if (!supabaseConfigured()) throw new Error("Supabase is not configured.");
   const headers = new Headers(options.headers || {});
-  headers.set("apikey", appState.supabase.anonKey);
+  headers.set("apikey", LOTUS_DEPLOYMENT.supabaseAnonKey);
   if (!headers.has("Content-Type") && options.body) headers.set("Content-Type", "application/json");
   const token = options.token === undefined ? appState.supabase.session?.accessToken : options.token;
   if (token) headers.set("Authorization", `Bearer ${token}`);
@@ -543,8 +536,7 @@ async function applyRemoteVault(row) {
   appState.notifications = {
     ...appState.notifications,
     pushEnabled: Boolean(localNotifications?.pushEnabled),
-    pushSubscriptionId: localNotifications?.pushSubscriptionId || null,
-    vapidPublicKey: localNotifications?.vapidPublicKey || appState.notifications.vapidPublicKey
+    pushSubscriptionId: localNotifications?.pushSubscriptionId || null
   };
   appState.sync = {
     ...localSync,
@@ -747,77 +739,23 @@ function notificationsAvailable() {
   return typeof window !== "undefined" && "Notification" in window;
 }
 
-function scheduleDailyReminder() {
-  clearTimeout(reminderTimer);
-  reminderTimer = null;
-  if (!appState?.notifications?.dailyEntry || !notificationsAvailable() || Notification.permission !== "granted") return;
-  const now = new Date();
-  const nextReminder = new Date(now);
-  nextReminder.setHours(ENTRY_REMINDER_HOUR, 0, 0, 0);
-  if (nextReminder <= now) nextReminder.setDate(nextReminder.getDate() + 1);
-  reminderTimer = setTimeout(() => deliverDailyReminder(), Math.max(1000, nextReminder.getTime() - now.getTime()));
-}
-
-async function deliverDailyReminder() {
-  reminderTimer = null;
-  if (!appState?.notifications?.dailyEntry || !notificationsAvailable() || Notification.permission !== "granted") return;
-  const today = localDateString(new Date());
-  if (appState.notifications.lastDeliveredDate === today) {
-    scheduleDailyReminder();
-    return;
-  }
-  try {
-    new Notification("Lotus", {
-      body: ENTRY_REMINDER_TEXT,
-      icon: "./assets/lotus-192.png",
-      badge: "./assets/lotus-192.png",
-      tag: "lotus-daily-entry"
-    });
-    appState.notifications.lastDeliveredDate = today;
-    await saveVault({ markChanged: false, queue: false });
-  } catch {
-    // Notification delivery can fail when the browser revokes permission or the document is closing.
-  }
-  scheduleDailyReminder();
-}
-
-function deliverMissedReminder() {
-  if (!appState?.notifications?.dailyEntry || !notificationsAvailable() || Notification.permission !== "granted") return;
-  const now = new Date();
-  if (now.getHours() >= ENTRY_REMINDER_HOUR && appState.notifications.lastDeliveredDate !== localDateString(now)) {
-    deliverDailyReminder();
-  }
-}
-
-async function enableDailyReminder() {
-  if (!notificationsAvailable()) {
-    showToast("Notifications are not available in this browser.");
-    return;
-  }
-  const permission = Notification.permission === "granted" ? "granted" : await Notification.requestPermission();
-  if (permission !== "granted") {
-    showToast("Allow notifications in your browser to enable the daily reminder.");
-    return;
-  }
-  appState.notifications.dailyEntry = true;
-  await saveVault();
-  renderApp();
-  showToast("Daily 21:00 reminder enabled.");
-}
-
-async function disableDailyReminder() {
-  appState.notifications.dailyEntry = false;
-  clearTimeout(reminderTimer);
-  reminderTimer = null;
-  await saveVault();
-  renderApp();
-  showToast("Daily reminder turned off.");
-}
-
 function pushNotificationsAvailable() {
   return notificationsAvailable()
     && "serviceWorker" in navigator
     && "PushManager" in window;
+}
+
+function readyServiceWorker(timeoutMs = 8000) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("Lotus could not prepare notifications on this device.")), timeoutMs);
+    navigator.serviceWorker.ready.then((registration) => {
+      clearTimeout(timeout);
+      resolve(registration);
+    }).catch((error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+  });
 }
 
 function urlBase64ToUint8Array(value) {
@@ -857,12 +795,12 @@ function pushSubscriptionDetails(subscription) {
   };
 }
 
-async function savePushPublicKey(form) {
-  const publicKey = form.elements.vapidPublicKey.value.trim();
-  appState.notifications.vapidPublicKey = publicKey;
-  await saveVault({ markChanged: false, queue: false });
-  renderApp();
-  showToast(publicKey ? "VAPID public key saved." : "VAPID public key removed.");
+function applicationServerKeysMatch(subscription, expectedKey) {
+  const currentKey = subscription?.options?.applicationServerKey;
+  if (!currentKey) return true;
+  const currentBytes = new Uint8Array(currentKey);
+  return currentBytes.length === expectedKey.length
+    && currentBytes.every((byte, index) => byte === expectedKey[index]);
 }
 
 async function enablePushNotifications() {
@@ -871,12 +809,12 @@ async function enablePushNotifications() {
     return;
   }
   if (!supabaseConfigured() || !supabaseSignedIn()) {
-    showToast("Sign in to Supabase before enabling push reminders.");
+    showToast("Sign in before enabling the daily reminder.");
     return;
   }
-  const publicKey = appState.notifications?.vapidPublicKey?.trim();
+  const publicKey = LOTUS_DEPLOYMENT.vapidPublicKey;
   if (!publicKey) {
-    showToast("Save your VAPID public key first.");
+    showToast("The reminder service is not configured for this deployment.");
     return;
   }
 
@@ -892,8 +830,12 @@ async function enablePushNotifications() {
     }
 
     await refreshSupabaseSession();
-    const registration = await navigator.serviceWorker.ready;
+    const registration = await readyServiceWorker();
     let subscription = await registration.pushManager.getSubscription();
+    if (subscription && !applicationServerKeysMatch(subscription, applicationServerKey)) {
+      await subscription.unsubscribe();
+      subscription = null;
+    }
     if (!subscription) {
       subscription = await registration.pushManager.subscribe({
         userVisibleOnly: true,
@@ -920,9 +862,9 @@ async function enablePushNotifications() {
     appState.notifications.pushSubscriptionId = id;
     await saveVault({ markChanged: false, queue: false });
     renderApp();
-    showToast("Push reminders enabled for 21:00.");
+    showToast("Daily reminder enabled for 21:00.");
   } catch (error) {
-    showToast(error.message || "Push reminders could not be enabled.");
+    showToast(error.message || "The daily reminder could not be enabled.");
   }
 }
 
@@ -930,7 +872,7 @@ async function disablePushNotifications({ silent = false } = {}) {
   const subscriptionId = appState.notifications?.pushSubscriptionId;
   try {
     if (pushNotificationsAvailable()) {
-      const registration = await navigator.serviceWorker.ready;
+      const registration = await readyServiceWorker();
       const subscription = await registration.pushManager.getSubscription();
       if (subscription) await subscription.unsubscribe();
     }
@@ -941,7 +883,7 @@ async function disablePushNotifications({ silent = false } = {}) {
     }
   } catch (error) {
     if (!silent) {
-      showToast(error.message || "Push reminders could not be turned off.");
+      showToast(error.message || "The daily reminder could not be turned off.");
       return;
     }
   }
@@ -950,7 +892,27 @@ async function disablePushNotifications({ silent = false } = {}) {
   await saveVault({ markChanged: false, queue: false });
   if (!silent) {
     renderApp();
-    showToast("Push reminders turned off.");
+    showToast("Daily reminder turned off.");
+  }
+}
+
+async function testDeviceNotification() {
+  if (!pushNotificationsAvailable() || Notification.permission !== "granted") {
+    showToast("Enable the daily reminder before testing this device.");
+    return;
+  }
+  try {
+    const registration = await readyServiceWorker();
+    await registration.showNotification("Lotus", {
+      body: "Notifications are ready on this device.",
+      icon: "./assets/lotus-192.png",
+      badge: "./assets/lotus-192.png",
+      tag: "lotus-device-test",
+      data: { url: "./#today" }
+    });
+    showToast("Test notification sent to this device.");
+  } catch {
+    showToast("This device could not display the test notification.");
   }
 }
 
@@ -1074,8 +1036,6 @@ function renderApp() {
       </main>
       ${renderNav()}
     </div>`;
-  scheduleDailyReminder();
-  deliverMissedReminder();
 }
 
 function renderToday() {
@@ -1365,18 +1325,16 @@ function renderInsights() {
 }
 
 function renderSupabaseSettings() {
-  const config = appState.supabase || {};
-  const session = config.session;
-  const status = !supabaseConfigured() ? "Not connected" : session ? (appState.sync.status === "error" ? "Needs attention" : appState.sync.status === "synced" ? "Synced" : "Ready to sync") : "Connection saved";
+  const session = appState.supabase?.session;
+  const status = !supabaseConfigured()
+    ? "Setup required"
+    : session
+      ? (appState.sync.status === "error" ? "Needs attention" : appState.sync.status === "synced" ? "Synced" : "Ready")
+      : "Signed out";
   return `
-    <div class="section-heading"><h2>Supabase sync</h2></div>
+    <div class="section-heading"><h2>Data &amp; sync</h2></div>
     <section class="card card-pad">
-      <div class="backup-row"><div><h3>Optional cross-device sync</h3><p class="helper-text">Your tracker stays local-first. Lotus encrypts the vault before sending it to Supabase.</p></div><span class="status-chip ${session ? "strong" : ""}">${status}</span></div>
-      <form id="supabase-config-form" class="form-stack" style="margin-top:22px;">
-        <div class="form-field"><label class="field-label" for="supabase-url">Project URL</label><input class="text-input" id="supabase-url" name="url" type="url" value="${escapeHtml(config.url)}" placeholder="https://your-project.supabase.co" autocomplete="off" required /></div>
-        <div class="form-field"><label class="field-label" for="supabase-anon-key">Anon key</label><input class="text-input" id="supabase-anon-key" name="anonKey" value="${escapeHtml(config.anonKey)}" placeholder="Your public anon key" autocomplete="off" required /><span class="helper-text">This is the public client key from your Supabase project settings.</span></div>
-        <div class="form-actions"><button class="button-secondary" type="submit">Save connection ${icon("check", 18)}</button></div>
-      </form>
+      <div class="backup-row"><div><h3>Encrypted sync</h3><p class="helper-text">Lotus stays local-first and encrypts your vault before anything is synced.</p></div><span class="status-chip ${session ? "strong" : ""}">${status}</span></div>
       ${session ? `
         <div class="settings-row" style="margin-top:12px;"><div class="settings-row-copy"><span class="settings-row-title">Signed in as ${escapeHtml(session.user.email || "your Supabase account")}</span><span class="settings-row-detail">${appState.sync.remoteUpdatedAt ? `Last remote update: ${formatDate(localDateString(new Date(appState.sync.remoteUpdatedAt)), { month: "short", day: "numeric", year: "numeric" })}.` : "No remote vault has been created yet."}</span></div>${icon("check", 22)}</div>
         <div class="form-actions"><button class="button-primary supabase-sync-button" type="button" data-action="sync-now">Sync now</button><button class="button-quiet" type="button" data-action="signout-supabase">Sign out</button></div>` : supabaseConfigured() ? `
@@ -1384,23 +1342,20 @@ function renderSupabaseSettings() {
           <div class="form-field"><label class="field-label" for="supabase-email">Email</label><input class="text-input" id="supabase-email" name="email" type="email" autocomplete="email" required /></div>
           <div class="form-field"><label class="field-label" for="supabase-password">Supabase password</label><input class="text-input" id="supabase-password" name="password" type="password" autocomplete="current-password" minlength="6" required /></div>
           <div class="form-actions"><button class="button-secondary" type="submit" name="authAction" value="signin">Sign in</button><button class="button-primary" type="submit" name="authAction" value="signup">Create account</button></div>
-        </form>` : `<p class="helper-text" style="margin-top:18px;">Save your project connection first, then sign in or create a Supabase account.</p>`}
-      <p class="helper-text" style="margin-top:18px;">Run the included <strong>supabase-schema.sql</strong> once in your Supabase SQL editor before syncing.</p>
+        </form>` : `
+        <p class="helper-text settings-guidance">Encrypted sync is unavailable because this deployment is missing its connection configuration.</p>`}
     </section>`;
 }
 
 function renderReminderSettings() {
-  const supported = notificationsAvailable();
-  const enabled = Boolean(appState.notifications?.dailyEntry && supported && Notification.permission === "granted");
-  const permission = supported ? Notification.permission : "unsupported";
-  const status = enabled ? "Enabled" : permission === "denied" ? "Blocked" : "Off";
   const pushSupported = pushNotificationsAvailable();
   const pushStored = Boolean(appState.notifications?.pushEnabled);
   const pushPermission = pushSupported ? Notification.permission : "unsupported";
   const pushSignedIn = supabaseConfigured() && supabaseSignedIn();
-  const pushPublicKey = appState.notifications?.vapidPublicKey || "";
-  const pushStatus = pushStored && pushPermission === "granted"
-    ? "Enabled"
+  const pushPublicKey = LOTUS_DEPLOYMENT.vapidPublicKey;
+  const pushActive = pushStored && pushPermission === "granted";
+  const pushStatus = pushActive
+    ? "On"
     : pushPermission === "denied"
       ? "Blocked"
       : !pushSupported
@@ -1413,22 +1368,23 @@ function renderReminderSettings() {
   return `
     <div class="section-heading"><h2>Daily reminder</h2></div>
     <section class="card card-pad">
-      <div class="backup-row"><div><h3>Entry reminder</h3><p class="helper-text">At 21:00 each day: ${ENTRY_REMINDER_TEXT}</p></div><span class="status-chip ${enabled ? "strong" : ""}">${status}</span></div>
-      <div class="form-actions"><button class="${enabled ? "button-quiet" : "button-primary"}" type="button" data-action="${enabled ? "disable-reminder" : "enable-reminder"}" ${supported ? "" : "disabled"}>${enabled ? "Turn off reminder" : "Enable 21:00 reminder"}</button></div>
-      ${permission === "denied" ? '<p class="helper-text" style="margin-top:18px;">Notifications are blocked in your browser. Allow them in your browser settings, then try again.</p>' : !supported ? '<p class="helper-text" style="margin-top:18px;">This browser does not support reminders.</p>' : ""}
-      <div class="settings-divider" aria-hidden="true"></div>
-      <div class="backup-row"><div><h3>Push reminder</h3><p class="helper-text">Receive the same reminder even when Lotus is closed.</p></div><span class="status-chip ${pushStored && pushPermission === "granted" ? "strong" : ""}">${pushStatus}</span></div>
-      <form id="push-key-form" class="form-stack" style="margin-top:22px;">
-        <div class="form-field"><label class="field-label" for="push-vapid-public-key">VAPID public key</label><input class="text-input" id="push-vapid-public-key" name="vapidPublicKey" value="${escapeHtml(pushPublicKey)}" placeholder="Paste your public key" autocomplete="off" autocapitalize="off" spellcheck="false" ${pushStored ? "readonly" : ""} /><span class="helper-text">This public key identifies the push service. Keep the matching private key only in Supabase.</span></div>
-        <div class="form-actions"><button class="button-secondary" type="submit" ${pushStored ? "disabled" : ""}>Save public key ${icon("check", 18)}</button></div>
-      </form>
-      <div class="form-actions"><button class="${pushStored ? "button-quiet" : "button-primary"}" type="button" data-action="${pushStored ? "disable-push" : "enable-push"}" ${(!pushSupported || (!pushSignedIn && !pushStored) || (!pushPublicKey && !pushStored)) ? "disabled" : ""}>${pushStored ? "Turn off push reminders" : "Enable push reminders"}</button></div>
-      ${pushPermission === "denied" ? '<p class="helper-text" style="margin-top:18px;">Push permission is blocked in your browser. Allow notifications in browser settings, then turn push reminders on again.</p>' : !pushSupported ? '<p class="helper-text" style="margin-top:18px;">Push notifications need a supported browser and an installed or open PWA.</p>' : !pushSignedIn ? '<p class="helper-text" style="margin-top:18px;">Sign in to Supabase so Lotus can deliver reminders while the app is closed.</p>' : ""}
+      <div class="backup-row"><div><h3>Check-in reminder</h3><p class="helper-text">${ENTRY_REMINDER_TEXT}</p></div><span class="status-chip ${pushActive ? "strong" : ""}">${pushStatus}</span></div>
+      <div class="reminder-facts">
+        <div><span class="mini-label">Time</span><span>21:00 daily</span></div>
+        <div><span class="mini-label">Timezone</span><span>${escapeHtml(browserTimeZone())}</span></div>
+        <div><span class="mini-label">Delivery</span><span>Works while Lotus is closed</span></div>
+      </div>
+      <div class="form-actions reminder-actions">
+        ${pushActive ? `<button class="button-secondary" type="button" data-action="test-notification">Test this device</button>` : ""}
+        <button class="${pushActive ? "button-quiet" : "button-primary"}" type="button" data-action="${pushActive ? "disable-push" : "enable-push"}" ${(!pushSupported || (!pushSignedIn && !pushStored) || (!pushPublicKey && !pushStored)) ? "disabled" : ""}>${pushActive ? "Turn off reminder" : "Enable reminder"}</button>
+      </div>
+      ${pushPermission === "denied" ? '<p class="helper-text settings-guidance">Notifications are blocked for Lotus. Allow them in your device settings, then return here.</p>' : !pushSupported ? '<p class="helper-text settings-guidance">On iPhone, install Lotus on the Home Screen before enabling notifications.</p>' : !pushSignedIn ? '<p class="helper-text settings-guidance">Sign in under Data &amp; sync to receive the reminder while Lotus is closed.</p>' : !pushPublicKey ? '<p class="helper-text settings-guidance">The reminder service is unavailable because this deployment is missing its public notification configuration.</p>' : ""}
     </section>`;
 }
 
 function renderSettings() {
   const lastBackup = appState.backup.lastBackupAt;
+  const learnedCycles = getCompletedCycles().length;
   return `
     <div class="page-heading">
       <div>
@@ -1437,17 +1393,17 @@ function renderSettings() {
       </div>
     </div>
     <section class="card card-pad">
-      <h2>Cycle preferences</h2>
-      <p class="helper-text" style="margin-top:8px;">These settings shape your estimates. Your body can vary from month to month.</p>
+      <h2>Profile &amp; cycle</h2>
+      <p class="helper-text" style="margin-top:8px;">These starting values shape estimates until Lotus learns from your recorded cycles.</p>
       <form id="settings-form" class="form-stack" style="margin-top:22px;">
         <div class="form-field"><label class="field-label" for="profile-name">Name</label><input class="text-input" id="profile-name" name="name" value="${escapeHtml(appState.profile.name)}" required maxlength="60" /></div>
-        <div class="form-field"><label class="field-label" for="average-cycle">Average cycle length</label><input class="number-input" id="average-cycle" name="averageCycleLength" type="number" min="21" max="45" value="${appState.profile.averageCycleLength}" required /><span class="helper-text">Usually counted from the first day of one period to the first day of the next.</span></div>
+        <div class="form-field"><label class="field-label" for="average-cycle">Starting cycle length</label><input class="number-input" id="average-cycle" name="averageCycleLength" type="number" min="21" max="45" value="${appState.profile.averageCycleLength}" required /><span class="helper-text">${learnedCycles ? `Lotus is now learning from ${learnedCycles} completed cycle${learnedCycles === 1 ? "" : "s"}; this remains your fallback.` : "Counted from the first day of one period to the first day of the next."}</span></div>
         <div class="form-field"><label class="field-label" for="period-length">Typical period length</label><input class="number-input" id="period-length" name="periodLength" type="number" min="2" max="10" value="${appState.profile.periodLength}" required /></div>
         <div class="form-actions"><button class="button-primary" type="submit">Save preferences ${icon("check", 18)}</button></div>
       </form>
     </section>
-    ${renderSupabaseSettings()}
     ${renderReminderSettings()}
+    ${renderSupabaseSettings()}
     <div class="section-heading"><h2>Backup</h2></div>
     <section class="card card-pad backup-card">
       <h3>Encrypted JSON backup</h3>
@@ -1459,7 +1415,7 @@ function renderSettings() {
     </section>
     <div class="section-heading"><h2>Privacy</h2></div>
     <section class="card card-pad">
-      <div class="settings-row"><div class="settings-row-copy"><span class="settings-row-title">Local-first protection</span><span class="settings-row-detail">Your entries are encrypted on this device. Lotus is ready for future sync without exposing plaintext entries.</span></div>${icon("lock", 22)}</div>
+      <div class="settings-row"><div class="settings-row-copy"><span class="settings-row-title">Local-first protection</span><span class="settings-row-detail">Your entries are encrypted on this device and before they are synced or exported.</span></div>${icon("lock", 22)}</div>
       <div class="form-actions"><button class="button-secondary" type="button" data-action="lock">Lock Lotus now ${icon("lock", 17)}</button></div>
     </section>`;
 }
@@ -1514,8 +1470,6 @@ async function unlockAccount(form) {
 async function lockApp() {
   appState = null;
   currentPassword = null;
-  clearTimeout(reminderTimer);
-  reminderTimer = null;
   activeView = "today";
   renderUnlock();
 }
@@ -1608,34 +1562,6 @@ async function saveSettings(form) {
   await saveVault();
   showToast("Preferences saved.");
   renderApp();
-}
-
-async function saveSupabaseConfig(form) {
-  const url = form.elements.url.value.trim().replace(/\/+$/, "");
-  const anonKey = form.elements.anonKey.value.trim();
-  try {
-    const parsed = new URL(url);
-    if (!/^https?:$/.test(parsed.protocol) || !anonKey) throw new Error("Invalid connection");
-    const changed = appState.supabase.url !== url || appState.supabase.anonKey !== anonKey;
-    if (changed && appState.notifications?.pushEnabled) await disablePushNotifications({ silent: true });
-    appState.supabase.url = url;
-    appState.supabase.anonKey = anonKey;
-    if (changed) {
-      appState.supabase.session = null;
-      appState.sync.enabled = false;
-      appState.sync.mode = "local-first";
-      appState.sync.status = "local";
-      appState.sync.remoteUpdatedAt = null;
-      appState.sync.remoteRevision = null;
-      appState.sync.lastPushedAt = null;
-      appState.sync.lastPulledAt = null;
-    }
-    await saveVault({ markChanged: false, queue: false });
-    showToast("Supabase connection saved.");
-    renderApp();
-  } catch (error) {
-    showToast("Enter a valid Supabase project URL and anon key.");
-  }
 }
 
 async function authenticateSupabase(form, action) {
@@ -1797,10 +1723,9 @@ document.addEventListener("click", async (event) => {
     renderApp();
     return;
   }
-  if (actionName === "enable-reminder") return enableDailyReminder();
-  if (actionName === "disable-reminder") return disableDailyReminder();
   if (actionName === "enable-push") return enablePushNotifications();
   if (actionName === "disable-push") return disablePushNotifications();
+  if (actionName === "test-notification") return testDeviceNotification();
   if (actionName === "export-backup") return exportBackup();
   if (actionName === "sync-now") return syncNow({ silent: false });
   if (actionName === "signout-supabase") return signOutSupabase();
@@ -1814,9 +1739,7 @@ document.addEventListener("submit", async (event) => {
     if (form.id === "unlock-form") await unlockAccount(form);
     if (form.id === "checkin-form") await saveCheckin(form);
     if (form.id === "settings-form") await saveSettings(form);
-    if (form.id === "supabase-config-form") await saveSupabaseConfig(form);
     if (form.id === "supabase-auth-form") await authenticateSupabase(form, event.submitter?.value || "signin");
-    if (form.id === "push-key-form") await savePushPublicKey(form);
   } catch (error) {
     showToast("Lotus could not save that just now.");
   }
@@ -1835,13 +1758,6 @@ document.addEventListener("input", (event) => {
 
 document.addEventListener("change", async (event) => {
   if (event.target.dataset.action === "restore-backup") await restoreBackup(event.target);
-});
-
-document.addEventListener("visibilitychange", () => {
-  if (!document.hidden && appState) {
-    scheduleDailyReminder();
-    deliverMissedReminder();
-  }
 });
 
 async function boot() {
