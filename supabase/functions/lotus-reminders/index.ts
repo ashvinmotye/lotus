@@ -2,7 +2,7 @@ import webpush from "npm:web-push@3.6.7";
 
 const PUSH_TABLE = "q4n8";
 const REMINDER_TEXT = "Take some time to pause and reflect.";
-const REMINDER_HOUR = 21;
+const REMINDER_HOURS = new Set([10, 12, 14, 16, 18, 20, 22]);
 const DEFAULT_TIMEZONE = Deno.env.get("LOTUS_DEFAULT_TIMEZONE") || "UTC";
 
 type PushSubscriptionRow = {
@@ -12,6 +12,7 @@ type PushSubscriptionRow = {
   auth: string;
   timezone: string | null;
   last_sent_date: string | null;
+  last_sent_hour: number | null;
 };
 
 function json(body: unknown, status = 200) {
@@ -79,11 +80,19 @@ function localClock(timeZone: string | null, instant: Date) {
   }
 }
 
-async function markSent(id: string, date: string) {
-  await supabaseRest(`/rest/v1/${PUSH_TABLE}?id=eq.${encodeURIComponent(id)}`, {
+async function claimReminderSlot(id: string, date: string, hour: number) {
+  // The database claims each local time slot atomically, even if cron overlaps.
+  return await supabaseRest("/rest/v1/rpc/n9c4", {
+    method: "POST",
+    body: JSON.stringify({ p_id: id, p_date: date, p_hour: hour })
+  }) === true;
+}
+
+async function releaseReminderSlot(id: string, date: string, hour: number) {
+  await supabaseRest(`/rest/v1/${PUSH_TABLE}?id=eq.${encodeURIComponent(id)}&last_sent_date=eq.${date}&last_sent_hour=eq.${hour}`, {
     method: "PATCH",
     headers: { Prefer: "return=minimal" },
-    body: JSON.stringify({ last_sent_date: date, updated_at: new Date().toISOString() })
+    body: JSON.stringify({ last_sent_hour: null, updated_at: new Date().toISOString() })
   });
 }
 
@@ -103,14 +112,8 @@ Deno.serve(async (request) => {
     webpush.setVapidDetails(vapidSubject, vapidPublicKey, vapidPrivateKey);
 
     const rows = await supabaseRest(
-      `/rest/v1/${PUSH_TABLE}?enabled=eq.true&select=id,endpoint,p256dh,auth,timezone,last_sent_date`
+      `/rest/v1/${PUSH_TABLE}?enabled=eq.true&select=id,endpoint,p256dh,auth,timezone,last_sent_date,last_sent_hour`
     ) as PushSubscriptionRow[];
-    const payload = JSON.stringify({
-      title: "Lotus",
-      body: REMINDER_TEXT,
-      url: "./#today",
-      tag: "lotus-daily-entry"
-    });
     const now = new Date();
     let sent = 0;
     let expired = 0;
@@ -118,13 +121,22 @@ Deno.serve(async (request) => {
 
     for (const row of rows || []) {
       const clock = localClock(row.timezone, now);
-      if (!clock || clock.hour !== REMINDER_HOUR || row.last_sent_date === clock.date) continue;
+      if (!clock || !REMINDER_HOURS.has(clock.hour) ||
+        (row.last_sent_date === clock.date && row.last_sent_hour === clock.hour)) continue;
+      let claimed = false;
       try {
+        claimed = await claimReminderSlot(row.id, clock.date, clock.hour);
+        if (!claimed) continue;
+        const payload = JSON.stringify({
+          title: "Lotus",
+          body: REMINDER_TEXT,
+          url: "./#today",
+          tag: `lotus-reminder-${clock.date}-${clock.hour}`
+        });
         await webpush.sendNotification({
           endpoint: row.endpoint,
           keys: { p256dh: row.p256dh, auth: row.auth }
         }, payload);
-        await markSent(row.id, clock.date);
         sent += 1;
       } catch (error) {
         const statusCode = (error as { statusCode?: number })?.statusCode;
@@ -132,6 +144,13 @@ Deno.serve(async (request) => {
           await removeSubscription(row.id);
           expired += 1;
         } else {
+          if (claimed) {
+            try {
+              await releaseReminderSlot(row.id, clock.date, clock.hour);
+            } catch {
+              // Keep the original delivery error; the next slot is still eligible.
+            }
+          }
           errors.push(row.id);
         }
       }

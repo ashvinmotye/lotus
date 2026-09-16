@@ -1,4 +1,5 @@
 const appRoot = document.getElementById("app");
+const APP_VERSION = "1.1.0";
 const LOTUS_DEPLOYMENT = Object.freeze({
   supabaseUrl: String(window.LOTUS_CONFIG?.LOTUS_SUPABASE_URL || "").trim().replace(/\/+$/, ""),
   supabaseAnonKey: String(window.LOTUS_CONFIG?.LOTUS_SUPABASE_ANON_KEY || "").trim(),
@@ -745,6 +746,15 @@ function pushNotificationsAvailable() {
     && "PushManager" in window;
 }
 
+function clearReminderBadge() {
+  if ("clearAppBadge" in navigator) navigator.clearAppBadge().catch(() => {});
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.ready.then((registration) => {
+      registration.active?.postMessage({ type: "lotus-clear-reminder-badge" });
+    }).catch(() => {});
+  }
+}
+
 function readyServiceWorker(timeoutMs = 8000) {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error("Lotus could not prepare notifications on this device.")), timeoutMs);
@@ -809,7 +819,7 @@ async function enablePushNotifications() {
     return;
   }
   if (!supabaseConfigured() || !supabaseSignedIn()) {
-    showToast("Sign in before enabling the daily reminder.");
+    showToast("Sign in before enabling reminders.");
     return;
   }
   const publicKey = LOTUS_DEPLOYMENT.vapidPublicKey;
@@ -862,9 +872,9 @@ async function enablePushNotifications() {
     appState.notifications.pushSubscriptionId = id;
     await saveVault({ markChanged: false, queue: false });
     renderApp();
-    showToast("Daily reminder enabled for 21:00.");
+    showToast("Reminders enabled from 10:00 to 22:00 every two hours.");
   } catch (error) {
-    showToast(error.message || "The daily reminder could not be enabled.");
+    showToast(error.message || "Reminders could not be enabled.");
   }
 }
 
@@ -883,22 +893,23 @@ async function disablePushNotifications({ silent = false } = {}) {
     }
   } catch (error) {
     if (!silent) {
-      showToast(error.message || "The daily reminder could not be turned off.");
+      showToast(error.message || "Reminders could not be turned off.");
       return;
     }
   }
   appState.notifications.pushEnabled = false;
   appState.notifications.pushSubscriptionId = null;
   await saveVault({ markChanged: false, queue: false });
+  clearReminderBadge();
   if (!silent) {
     renderApp();
-    showToast("Daily reminder turned off.");
+    showToast("Reminders turned off.");
   }
 }
 
 async function testDeviceNotification() {
   if (!pushNotificationsAvailable() || Notification.permission !== "granted") {
-    showToast("Enable the daily reminder before testing this device.");
+    showToast("Enable reminders before testing this device.");
     return;
   }
   try {
@@ -981,6 +992,7 @@ function renderOnboarding(error = "") {
           ${error ? `<p class="error-message" role="alert">${escapeHtml(error)}</p>` : ""}
           <button class="button-primary" type="submit">Begin gently ${icon("arrowRight", 18)}</button>
         </form>
+        <p class="welcome-version">v${APP_VERSION}</p>
       </section>
     </div>`;
 }
@@ -1000,6 +1012,7 @@ function renderUnlock(error = "") {
           ${error ? `<p class="error-message" role="alert">${escapeHtml(error)}</p>` : ""}
           <button class="button-primary" type="submit">Unlock ${icon("lock", 18)}</button>
         </form>
+        <p class="welcome-version">v${APP_VERSION}</p>
       </section>
     </div>`;
 }
@@ -1366,18 +1379,19 @@ function renderReminderSettings() {
             ? "Needs public key"
             : "Off";
   return `
-    <div class="section-heading"><h2>Daily reminder</h2></div>
+    <div class="section-heading"><h2>Reminders</h2></div>
     <section class="card card-pad">
-      <div class="backup-row"><div><h3>Check-in reminder</h3><p class="helper-text">${ENTRY_REMINDER_TEXT}</p></div><span class="status-chip ${pushActive ? "strong" : ""}">${pushStatus}</span></div>
+      <div class="backup-row"><div><h3>Check-in reminders</h3><p class="helper-text">${ENTRY_REMINDER_TEXT}</p></div><span class="status-chip ${pushActive ? "strong" : ""}">${pushStatus}</span></div>
       <div class="reminder-facts">
-        <div><span class="mini-label">Time</span><span>21:00 daily</span></div>
+        <div><span class="mini-label">Time</span><span>10:00–22:00 · every 2 hours</span></div>
         <div><span class="mini-label">Timezone</span><span>${escapeHtml(browserTimeZone())}</span></div>
         <div><span class="mini-label">Delivery</span><span>Works while Lotus is closed</span></div>
       </div>
       <div class="form-actions reminder-actions">
         ${pushActive ? `<button class="button-secondary" type="button" data-action="test-notification">Test this device</button>` : ""}
-        <button class="${pushActive ? "button-quiet" : "button-primary"}" type="button" data-action="${pushActive ? "disable-push" : "enable-push"}" ${(!pushSupported || (!pushSignedIn && !pushStored) || (!pushPublicKey && !pushStored)) ? "disabled" : ""}>${pushActive ? "Turn off reminder" : "Enable reminder"}</button>
+        <button class="${pushActive ? "button-quiet" : "button-primary"}" type="button" data-action="${pushActive ? "disable-push" : "enable-push"}" ${(!pushSupported || (!pushSignedIn && !pushStored) || (!pushPublicKey && !pushStored)) ? "disabled" : ""}>${pushActive ? "Turn off reminders" : "Enable reminders"}</button>
       </div>
+      ${pushActive ? '<p class="helper-text settings-guidance">On supported devices, the app icon shows how many reminders arrived since you last opened Lotus.</p>' : ""}
       ${pushPermission === "denied" ? '<p class="helper-text settings-guidance">Notifications are blocked for Lotus. Allow them in your device settings, then return here.</p>' : !pushSupported ? '<p class="helper-text settings-guidance">On iPhone, install Lotus on the Home Screen before enabling notifications.</p>' : !pushSignedIn ? '<p class="helper-text settings-guidance">Sign in under Data &amp; sync to receive the reminder while Lotus is closed.</p>' : !pushPublicKey ? '<p class="helper-text settings-guidance">The reminder service is unavailable because this deployment is missing its public notification configuration.</p>' : ""}
     </section>`;
 }
@@ -1760,6 +1774,10 @@ document.addEventListener("change", async (event) => {
   if (event.target.dataset.action === "restore-backup") await restoreBackup(event.target);
 });
 
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") clearReminderBadge();
+});
+
 async function boot() {
   if (!window.crypto?.subtle) {
     renderError("Lotus needs a secure browser context to protect your data. Open the installed PWA or use a local web server.");
@@ -1770,6 +1788,7 @@ async function boot() {
     if (stored) renderUnlock();
     else renderOnboarding();
     if ("serviceWorker" in navigator) navigator.serviceWorker.register("./service-worker.js").catch(() => {});
+    clearReminderBadge();
   } catch (error) {
     renderError("Lotus could not prepare private local storage in this browser.");
   }

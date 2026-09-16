@@ -49,6 +49,7 @@ create table if not exists public.q4n8 (
   timezone text not null default 'UTC',
   enabled boolean not null default true,
   last_sent_date date,
+  last_sent_hour smallint,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique (owner_id, endpoint)
@@ -88,4 +89,6 @@ grant select, insert, update, delete on table public.q4n8 to authenticated;
 -- 3. Store the same LOTUS_CRON_SECRET value in Supabase Vault under the name
 --    lotus_cron_secret so scheduled calls can authenticate.
 -- 4. Schedule lotus-reminders every 15 minutes. The function sends once per
---    subscription on its local day when the local hour is 21.
+--    subscription at 10, 12, 14, 16, 18, 20 and 22 in its local timezone.
+-- Run supabase-reminder-migration.sql before deploying this version of the
+-- Edge Function, including on new installations (it adds the claim function).
