@@ -1,0 +1,5 @@
+[functions.lotus-push-register-v2]
+verify_jwt = false
+
+[functions.lotus-push-send-v2]
+verify_jwt = false

@@ -1,5 +1,4 @@
 window.LOTUS_CONFIG = Object.freeze({
   LOTUS_SUPABASE_URL: "https://xacwgipxqujbqvhzogbd.supabase.co",
-  LOTUS_SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhhY3dnaXB4cXVqYnF2aHpvZ2JkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODY4ODU4MDQsImV4cCI6MjEwMjQ2MTgwNH0.qFP3XUroRQO0l6vg8iZwq8GR3n7qffpt3g3wgBqs5_Q",
   LOTUS_VAPID_PUBLIC_KEY: "BHtxwtsupBd7exZ4_AjqQ1RsB8FGiL3qOVTfKOxaZPWib8U85MnSiG5NnTckHO_KzJoqrvcOC_-Ivzsy9MVYKNg"
 });

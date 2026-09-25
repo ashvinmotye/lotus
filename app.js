@@ -1,15 +1,14 @@
 const appRoot = document.getElementById("app");
-const APP_VERSION = "1.1.0";
+const APP_VERSION = "2.0.0";
 const LOTUS_DEPLOYMENT = Object.freeze({
   supabaseUrl: String(window.LOTUS_CONFIG?.LOTUS_SUPABASE_URL || "").trim().replace(/\/+$/, ""),
-  supabaseAnonKey: String(window.LOTUS_CONFIG?.LOTUS_SUPABASE_ANON_KEY || "").trim(),
   vapidPublicKey: String(window.LOTUS_CONFIG?.LOTUS_VAPID_PUBLIC_KEY || "").trim()
 });
-const DB_NAME = "lotus-local-vault";
-const STORE_NAME = "encrypted-vault";
+const DB_NAME = "lotus-local-v2";
+const STORE_NAME = "state";
 const VAULT_KEY = "primary";
-const SUPABASE_TABLE = "x7m2";
-const PUSH_TABLE = "q4n8";
+const LEGACY_DB_NAME = "lotus-local-vault";
+const LEGACY_STORE_NAME = "encrypted-vault";
 const PBKDF2_ITERATIONS = 150000;
 const WATER_GOAL = 8;
 const ENTRY_REMINDER_TEXT = "Take some time to pause and reflect.";
@@ -78,14 +77,15 @@ const EXERCISE_OPTIONS = [
   ["cardio", "Cardio"],
   ["yoga", "Yoga"]
 ];
+const LH_OPTIONS = [["not-tested", "Not tested"], ["negative", "Negative"], ["positive", "Positive"], ["invalid", "Invalid"]];
+const MUCUS_OPTIONS = [["not-observed", "Not observed"], ["dry", "Dry"], ["sticky", "Sticky"], ["creamy", "Creamy"], ["watery", "Watery"], ["clear-stretchy", "Clear and stretchy"]];
+const OVULATION_SOURCE_OPTIONS = [["personal", "Personal estimate"], ["clinician", "Clinician confirmed"]];
 
 let appState = null;
-let currentPassword = null;
 let activeView = "today";
 let selectedDate = localDateString(new Date());
 let calendarCursor = new Date();
 let toastTimer = null;
-let syncTimer = null;
 
 function $(selector, parent = document) {
   return parent.querySelector(selector);
@@ -188,36 +188,36 @@ function icon(name, size = 20) {
   return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.today}</svg>`;
 }
 
-function openDatabase() {
+function openDatabase(name = DB_NAME, storeName = STORE_NAME) {
   return new Promise((resolve, reject) => {
     if (!window.indexedDB) {
-      reject(new Error("Lotus needs IndexedDB to protect local data."));
+      reject(new Error("Lotus needs IndexedDB to save local data."));
       return;
     }
-    const request = indexedDB.open(DB_NAME, 1);
-    request.onupgradeneeded = () => request.result.createObjectStore(STORE_NAME, { keyPath: "id" });
+    const request = indexedDB.open(name, 1);
+    request.onupgradeneeded = () => request.result.createObjectStore(storeName, { keyPath: "id" });
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error || new Error("Unable to open local storage."));
   });
 }
 
-async function readStoredVault() {
-  const database = await openDatabase();
+async function readStoredVault(name = DB_NAME, storeName = STORE_NAME) {
+  const database = await openDatabase(name, storeName);
   return new Promise((resolve, reject) => {
-    const transaction = database.transaction(STORE_NAME, "readonly");
-    const request = transaction.objectStore(STORE_NAME).get(VAULT_KEY);
-    request.onsuccess = () => resolve(request.result || null);
-    request.onerror = () => reject(request.error || new Error("Unable to read the local vault."));
+    const transaction = database.transaction(storeName, "readonly");
+    const request = transaction.objectStore(storeName).get(VAULT_KEY);
+    request.onsuccess = () => { database.close(); resolve(request.result || null); };
+    request.onerror = () => { database.close(); reject(request.error || new Error("Unable to read local data.")); };
   });
 }
 
-async function writeStoredVault(envelope) {
+async function writeStoredVault(state) {
   const database = await openDatabase();
   return new Promise((resolve, reject) => {
     const transaction = database.transaction(STORE_NAME, "readwrite");
-    transaction.objectStore(STORE_NAME).put({ id: VAULT_KEY, ...envelope });
-    transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error || new Error("Unable to save the local vault."));
+    transaction.objectStore(STORE_NAME).put({ id: VAULT_KEY, data: state });
+    transaction.oncomplete = () => { database.close(); resolve(); };
+    transaction.onerror = () => { database.close(); reject(transaction.error || new Error("Unable to save local data.")); };
   });
 }
 
@@ -243,27 +243,6 @@ async function deriveKey(password, salt) {
   );
 }
 
-async function encryptState(data, password) {
-  const salt = crypto.getRandomValues(new Uint8Array(16));
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const key = await deriveKey(password, salt);
-  const ciphertext = await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv },
-    key,
-    new TextEncoder().encode(JSON.stringify(data))
-  );
-  return {
-    version: 1,
-    algorithm: "AES-GCM",
-    kdf: "PBKDF2-SHA-256",
-    iterations: PBKDF2_ITERATIONS,
-    salt: bytesToBase64(salt),
-    iv: bytesToBase64(iv),
-    ciphertext: bytesToBase64(new Uint8Array(ciphertext)),
-    updatedAt: new Date().toISOString()
-  };
-}
-
 async function decryptEnvelope(envelope, password) {
   const salt = base64ToBytes(envelope.salt);
   const iv = base64ToBytes(envelope.iv);
@@ -278,7 +257,7 @@ async function decryptEnvelope(envelope, password) {
 
 function defaultState(name) {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     profile: {
       name,
       averageCycleLength: 28,
@@ -290,21 +269,10 @@ function defaultState(name) {
     backup: { lastBackupAt: null },
     notifications: {
       pushEnabled: false,
-      pushSubscriptionId: null
-    },
-    sync: {
-      mode: "local-first",
-      enabled: false,
-      lastSyncedAt: null,
-      status: "local",
-      localChangedAt: null,
-      lastPushedAt: null,
-      lastPulledAt: null,
-      remoteUpdatedAt: null,
-      remoteRevision: null
-    },
-    supabase: {
-      session: null
+      deviceId: null,
+      deviceSecret: null,
+      endpoint: null,
+      pendingDelete: false
     }
   };
 }
@@ -366,9 +334,17 @@ function normaliseState(state) {
           impact: validChoice(MOOD_OPTIONS, mood.impact, "none")
         }
       : null;
+    const fertility = log.fertility || {};
+    log.fertility = {
+      lh: validChoice(LH_OPTIONS, fertility.lh, "not-tested"),
+      lhTime: /^([01]\d|2[0-3]):[0-5]\d$/.test(fertility.lhTime || "") ? fertility.lhTime : "",
+      mucus: validChoice(MUCUS_OPTIONS, fertility.mucus, "not-observed"),
+      ovulationDate: /^\d{4}-\d{2}-\d{2}$/.test(fertility.ovulationDate || "") ? fertility.ovulationDate : "",
+      ovulationSource: validChoice(OVULATION_SOURCE_OPTIONS, fertility.ovulationSource, "personal")
+    };
   });
   return {
-    schemaVersion: state.schemaVersion || 1,
+    schemaVersion: 2,
     profile: {
       name: profile.name || "There",
       averageCycleLength: clamp(Number(profile.averageCycleLength) || 28, 21, 45),
@@ -379,231 +355,18 @@ function normaliseState(state) {
     dailyLogs,
     backup: { lastBackupAt: state.backup?.lastBackupAt || null },
     notifications: {
-      pushEnabled: Boolean(state.notifications?.pushEnabled),
-      pushSubscriptionId: state.notifications?.pushSubscriptionId || null
-    },
-    sync: {
-      mode: state.sync?.mode || "local-first",
-      enabled: Boolean(state.sync?.enabled),
-      lastSyncedAt: state.sync?.lastSyncedAt || null,
-      status: state.sync?.status || "local",
-      localChangedAt: state.sync?.localChangedAt || null,
-      lastPushedAt: state.sync?.lastPushedAt || null,
-      lastPulledAt: state.sync?.lastPulledAt || null,
-      remoteUpdatedAt: state.sync?.remoteUpdatedAt || null,
-      remoteRevision: numberOrNull(state.sync?.remoteRevision)
-    },
-    supabase: {
-      session: state.supabase?.session || null
+      pushEnabled: Boolean(state.notifications?.pushEnabled && state.notifications?.deviceSecret),
+      deviceId: state.notifications?.deviceId || null,
+      deviceSecret: state.notifications?.deviceSecret || null,
+      endpoint: state.notifications?.endpoint || null,
+      pendingDelete: Boolean(state.notifications?.pendingDelete)
     }
   };
 }
 
-async function saveVault({ markChanged = true, queue = true } = {}) {
-  if (!appState || !currentPassword) return;
-  if (markChanged) {
-    appState.sync.localChangedAt = new Date().toISOString();
-    appState.sync.status = appState.supabase?.session ? "pending" : "local";
-  }
-  await writeStoredVault(await encryptState(appState, currentPassword));
-  if (markChanged && queue) queueSync();
-}
-
-function supabaseConfigured() {
-  return Boolean(LOTUS_DEPLOYMENT.supabaseUrl && LOTUS_DEPLOYMENT.supabaseAnonKey);
-}
-
-function supabaseSignedIn() {
-  return Boolean(appState?.supabase?.session?.accessToken && appState?.supabase?.session?.user?.id);
-}
-
-function supabaseBaseUrl() {
-  return LOTUS_DEPLOYMENT.supabaseUrl;
-}
-
-async function supabaseRequest(path, options = {}) {
-  if (!supabaseConfigured()) throw new Error("Supabase is not configured.");
-  const headers = new Headers(options.headers || {});
-  headers.set("apikey", LOTUS_DEPLOYMENT.supabaseAnonKey);
-  if (!headers.has("Content-Type") && options.body) headers.set("Content-Type", "application/json");
-  const token = options.token === undefined ? appState.supabase.session?.accessToken : options.token;
-  if (token) headers.set("Authorization", `Bearer ${token}`);
-  const response = await fetch(`${supabaseBaseUrl()}${path}`, { ...options, headers });
-  const raw = await response.text();
-  let body = null;
-  try { body = raw ? JSON.parse(raw) : null; } catch { body = raw; }
-  if (!response.ok) {
-    throw new Error(body?.message || body?.error_description || body?.error || "Supabase request failed.");
-  }
-  return body;
-}
-
-function storeSupabaseSession(response) {
-  if (!response?.access_token || !response?.user) throw new Error("Supabase did not return a session.");
-  appState.supabase.session = {
-    accessToken: response.access_token,
-    refreshToken: response.refresh_token,
-    expiresAt: Date.now() + (Number(response.expires_in) || 3600) * 1000,
-    user: { id: response.user.id, email: response.user.email || "" }
-  };
-  appState.sync.enabled = true;
-  appState.sync.mode = "supabase";
-  appState.sync.status = "pending";
-}
-
-async function refreshSupabaseSession() {
-  const session = appState?.supabase?.session;
-  if (!session) return null;
-  if (session.expiresAt && session.expiresAt > Date.now() + 60000) return session;
-  const response = await supabaseRequest("/auth/v1/token?grant_type=refresh_token", {
-    method: "POST",
-    body: JSON.stringify({ refresh_token: session.refreshToken }),
-    token: null
-  });
-  storeSupabaseSession(response);
-  await saveVault({ markChanged: false, queue: false });
-  return appState.supabase.session;
-}
-
-function syncSafeState() {
-  const copy = JSON.parse(JSON.stringify(appState));
-  delete copy.supabase;
-  delete copy.sync;
-  if (copy.notifications) {
-    // A browser subscription belongs to this device, not to the shared vault.
-    copy.notifications.pushEnabled = false;
-    copy.notifications.pushSubscriptionId = null;
-  }
-  return copy;
-}
-
-function remoteEnvelope(row) {
-  return {
-    version: 1,
-    algorithm: "AES-GCM",
-    kdf: "PBKDF2-SHA-256",
-    iterations: PBKDF2_ITERATIONS,
-    salt: row.salt,
-    iv: row.iv,
-    ciphertext: row.ciphertext,
-    updatedAt: row.updated_at
-  };
-}
-
-async function readRemoteVault() {
-  await refreshSupabaseSession();
-  const rows = await supabaseRequest(`/rest/v1/${SUPABASE_TABLE}?id=eq.vault&select=id,owner_id,revision,updated_at,salt,iv,ciphertext`);
-  return Array.isArray(rows) ? rows[0] || null : null;
-}
-
-async function pushRemoteVault() {
-  await refreshSupabaseSession();
-  const user = appState.supabase.session?.user;
-  if (!user) throw new Error("No Supabase user is signed in.");
-  const encrypted = await encryptState(syncSafeState(), currentPassword);
-  const updatedAt = new Date().toISOString();
-  const revision = Math.max(Date.now(), (numberOrNull(appState.sync.remoteRevision) || 0) + 1);
-  const row = {
-    id: "vault",
-    owner_id: user.id,
-    revision,
-    updated_at: updatedAt,
-    salt: encrypted.salt,
-    iv: encrypted.iv,
-    ciphertext: encrypted.ciphertext
-  };
-  await supabaseRequest(`/rest/v1/${SUPABASE_TABLE}?on_conflict=owner_id,id`, {
-    method: "POST",
-    headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
-    body: JSON.stringify(row)
-  });
-  appState.sync.enabled = true;
-  appState.sync.mode = "supabase";
-  appState.sync.status = "synced";
-  appState.sync.lastPushedAt = updatedAt;
-  appState.sync.lastPulledAt = updatedAt;
-  appState.sync.remoteUpdatedAt = updatedAt;
-  appState.sync.remoteRevision = revision;
-  await saveVault({ markChanged: false, queue: false });
-}
-
-async function applyRemoteVault(row) {
-  const localSupabase = appState.supabase;
-  const localSync = appState.sync;
-  const localNotifications = appState.notifications;
-  const remoteState = normaliseState(await decryptEnvelope(remoteEnvelope(row), currentPassword));
-  appState = remoteState;
-  appState.supabase = localSupabase;
-  appState.notifications = {
-    ...appState.notifications,
-    pushEnabled: Boolean(localNotifications?.pushEnabled),
-    pushSubscriptionId: localNotifications?.pushSubscriptionId || null
-  };
-  appState.sync = {
-    ...localSync,
-    enabled: true,
-    mode: "supabase",
-    status: "synced",
-    localChangedAt: null,
-    lastPulledAt: row.updated_at,
-    remoteUpdatedAt: row.updated_at,
-    remoteRevision: numberOrNull(row.revision)
-  };
-  await saveVault({ markChanged: false, queue: false });
-}
-
-function queueSync() {
-  if (!supabaseConfigured() || !supabaseSignedIn() || !currentPassword) return;
-  clearTimeout(syncTimer);
-  syncTimer = setTimeout(() => syncNow({ silent: true }), 800);
-}
-
-async function syncNow({ silent = false } = {}) {
-  if (!supabaseConfigured() || !supabaseSignedIn() || !currentPassword) {
-    if (!silent) showToast("Add your Supabase connection and sign in first.");
-    return;
-  }
-  try {
-    const remote = await readRemoteVault();
-    if (!remote) {
-      await pushRemoteVault();
-    } else {
-      const remoteRevision = numberOrNull(remote.revision);
-      const knownRemoteRevision = numberOrNull(appState.sync.remoteRevision);
-      const sameRemoteMoment = timestampsMatch(remote.updated_at, appState.sync.remoteUpdatedAt);
-      const remoteIsNew = knownRemoteRevision !== null && remoteRevision !== null
-        ? remoteRevision !== knownRemoteRevision
-        : !sameRemoteMoment;
-      if (knownRemoteRevision === null && remoteRevision !== null && sameRemoteMoment) {
-        appState.sync.remoteRevision = remoteRevision;
-      }
-      const localChangedAt = appState.sync.localChangedAt;
-      const localUnsynced = Boolean(localChangedAt && (!appState.sync.lastPushedAt || Date.parse(localChangedAt) > Date.parse(appState.sync.lastPushedAt)));
-      if (localUnsynced && remoteIsNew) {
-        const useRemote = window.confirm("Lotus found a newer encrypted version on another device. Choose OK to use it, or Cancel to keep this device's data.");
-        if (useRemote) await applyRemoteVault(remote);
-        else await pushRemoteVault();
-      } else if (remoteIsNew) {
-        await applyRemoteVault(remote);
-      } else if (localUnsynced || !appState.sync.remoteUpdatedAt) {
-        await pushRemoteVault();
-      } else {
-        appState.sync.status = "synced";
-        await saveVault({ markChanged: false, queue: false });
-      }
-    }
-    if (!silent) {
-      showToast("Lotus is synced.");
-      renderApp();
-    }
-  } catch (error) {
-    appState.sync.status = "error";
-    await saveVault({ markChanged: false, queue: false });
-    if (!silent) {
-      showToast("Sync could not be completed. Your local data is safe.");
-      renderApp();
-    }
-  }
+async function saveVault() {
+  if (!appState) return;
+  await writeStoredVault(appState);
 }
 
 function getLog(dateString) {
@@ -657,10 +420,77 @@ function estimateOvulationOffset(cycleLength, historyCount = 1) {
   );
 }
 
-function getNextPeriodStart(dateString = localDateString(new Date())) {
+function getLutealHistory() {
+  const starts = [...appState.periodStarts].sort();
+  const lengths = [];
+  for (let index = 0; index < starts.length - 1; index += 1) {
+    const dates = Object.values(appState.dailyLogs)
+      .map((log) => log.fertility)
+      .filter((item) => item?.ovulationSource === "clinician"
+        && item.ovulationDate >= starts[index] && item.ovulationDate < starts[index + 1])
+      .map((item) => item.ovulationDate).sort();
+    if (!dates.length) continue;
+    const length = daysBetween(dates.at(-1), starts[index + 1]);
+    if (length >= 8 && length <= 20) lengths.push(length);
+  }
+  if (lengths.length < 2) return null;
+  const recent = lengths.slice(-8).sort((a, b) => a - b);
+  return { days: Math.round((recent[Math.floor((recent.length - 1) / 2)] + recent[Math.floor(recent.length / 2)]) / 2), count: lengths.length };
+}
+
+function getCycleEvidence(start) {
+  const dates = Object.keys(appState.dailyLogs).filter((date) => date >= start
+    && date <= localDateString(new Date())
+    && !appState.periodStarts.some((next) => next > start && next <= date)).sort();
+  const positives = dates.filter((date) => appState.dailyLogs[date].fertility?.lh === "positive");
+  const separated = positives.some((date) => daysBetween(positives[0], date) > 4);
+  const clinician = dates.map((date) => appState.dailyLogs[date].fertility)
+    .filter((item) => item?.ovulationSource === "clinician" && item.ovulationDate >= start)
+    .map((item) => item.ovulationDate).sort().at(-1) || null;
+  const personal = dates.map((date) => appState.dailyLogs[date].fertility)
+    .filter((item) => item?.ovulationSource === "personal" && item.ovulationDate >= start)
+    .map((item) => item.ovulationDate).sort().at(-1) || null;
+  const mucusDates = dates.filter((date) => ["watery", "clear-stretchy"].includes(appState.dailyLogs[date].fertility?.mucus));
+  return { firstPositive: positives[0] || null, separated, clinician, personal, mucusDates };
+}
+
+function getPredictionDetails(dateString = localDateString(new Date())) {
   const latest = getLatestPeriodStart(dateString);
   const model = getPredictionModel();
-  return latest && model ? addDays(latest, model.cycleLength) : null;
+  if (!latest || !model) return null;
+  const baseline = addDays(latest, model.cycleLength);
+  const baselineOvulation = addDays(latest, estimateOvulationOffset(model.cycleLength, model.historyCount || 1));
+  const evidence = getCycleEvidence(latest);
+  const luteal = getLutealHistory();
+  const result = {
+    baseline, center: baseline, rangeStart: null, rangeEnd: null,
+    ovulationStart: baselineOvulation, ovulationEnd: baselineOvulation,
+    source: "calendar", evidence, luteal
+  };
+  if (evidence.clinician) {
+    result.source = "recorded";
+    result.ovulationStart = evidence.clinician;
+    result.ovulationEnd = evidence.clinician;
+  } else if (evidence.firstPositive && !evidence.separated) {
+    result.source = "lh";
+    result.ovulationStart = addDays(evidence.firstPositive, 1);
+    result.ovulationEnd = addDays(evidence.firstPositive, 2);
+  } else if (evidence.personal) {
+    result.source = "personal";
+    result.ovulationStart = evidence.personal;
+    result.ovulationEnd = evidence.personal;
+  }
+  if (result.source !== "calendar") {
+    const lutealDays = luteal?.days || 14;
+    result.center = addDays(result.ovulationStart, lutealDays + (result.source === "lh" ? 1 : 0));
+    result.rangeStart = addDays(result.ovulationStart, 11);
+    result.rangeEnd = addDays(result.ovulationEnd, 17);
+  }
+  return result;
+}
+
+function getNextPeriodStart(dateString = localDateString(new Date())) {
+  return getPredictionDetails(dateString)?.center || null;
 }
 
 function currentCycleDay(dateString = localDateString(new Date())) {
@@ -669,10 +499,14 @@ function currentCycleDay(dateString = localDateString(new Date())) {
 }
 
 function isPredictedPeriodDate(dateString) {
-  return getCycleWindows().some((window) => window.projectedPeriod
-    && dateString >= window.start
-    && dateString < addDays(window.start, appState.profile.periodLength)
-    && !isPeriodDate(dateString));
+  const details = getPredictionDetails();
+  const model = getPredictionModel();
+  if (!details || !model || isPeriodDate(dateString)) return false;
+  for (let index = 0; index < 6; index += 1) {
+    const start = addDays(details.center, index * model.cycleLength);
+    if (dateString >= start && dateString < addDays(start, appState.profile.periodLength)) return true;
+  }
+  return false;
 }
 
 function createCycleWindow(start, cycleLength, historyCount, projectedPeriod = false) {
@@ -706,6 +540,10 @@ function getCycleWindows() {
   let cycleStart = starts.at(-1);
   for (let index = 0; index < 6; index += 1) {
     windows.push(createCycleWindow(cycleStart, model.cycleLength, model.historyCount || 1, index > 0));
+    if (index === 0) {
+      cycleStart = getPredictionDetails()?.center || addDays(cycleStart, model.cycleLength);
+      continue;
+    }
     cycleStart = addDays(cycleStart, model.cycleLength);
   }
   return windows;
@@ -713,10 +551,27 @@ function getCycleWindows() {
 
 function isPossibleFertileDate(dateString) {
   if (isPeriodDate(dateString)) return false;
+  const details = getPredictionDetails();
+  if (details && dateString >= getLatestPeriodStart() && details.evidence.mucusDates.includes(dateString)) return true;
+  if (details?.source === "lh" && dateString >= addDays(details.ovulationStart, -5)
+    && dateString <= details.ovulationEnd) return true;
+  if (["recorded", "personal"].includes(details?.source) && dateString >= addDays(details.ovulationStart, -5)
+    && dateString <= details.ovulationEnd) return true;
   return getCycleWindows().some((window) => dateString >= window.fertileStart && dateString <= window.fertileEnd);
 }
 
 function getNextFertileWindow(dateString = localDateString(new Date())) {
+  const details = getPredictionDetails();
+  if (details) {
+    const baseline = getCycleWindows().find((window) => window.start === getLatestPeriodStart());
+    const potential = details.source === "calendar" ? null : {
+      fertileStart: addDays(details.ovulationStart, -5), fertileEnd: details.ovulationEnd
+    };
+    const observed = details.evidence.mucusDates;
+    const starts = [baseline?.fertileStart, potential?.fertileStart, ...observed].filter(Boolean).sort();
+    const ends = [baseline?.fertileEnd, potential?.fertileEnd, ...observed].filter(Boolean).sort();
+    if (ends.at(-1) >= dateString) return { fertileStart: starts[0], fertileEnd: ends.at(-1) };
+  }
   return getCycleWindows().find((window) => window.fertileEnd >= dateString) || null;
 }
 
@@ -813,14 +668,53 @@ function applicationServerKeysMatch(subscription, expectedKey) {
     && currentBytes.every((byte, index) => byte === expectedKey[index]);
 }
 
+function pushConfigured() {
+  return Boolean(LOTUS_DEPLOYMENT.supabaseUrl && LOTUS_DEPLOYMENT.vapidPublicKey);
+}
+
+function randomDeviceSecret() {
+  return bytesToBase64(crypto.getRandomValues(new Uint8Array(32)))
+    .replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+}
+
+async function pushApi(action, details = {}) {
+  if (!pushConfigured()) throw new Error("The reminder service is not configured.");
+  const response = await fetch(`${LOTUS_DEPLOYMENT.supabaseUrl}/functions/v1/lotus-push-register-v2`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      action,
+      deviceId: appState.notifications.deviceId,
+      deviceSecret: appState.notifications.deviceSecret,
+      ...details
+    })
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || "The reminder service could not be reached.");
+  return result;
+}
+
+async function flushPushRemoval() {
+  if (!appState?.notifications?.pendingDelete || !navigator.onLine) return;
+  try {
+    await pushApi("unregister");
+    appState.notifications.pendingDelete = false;
+    appState.notifications.deviceId = null;
+    appState.notifications.deviceSecret = null;
+    appState.notifications.endpoint = null;
+    await saveVault();
+  } catch { /* The old subscription is also removed by the sender after push failure. */ }
+}
+
 async function enablePushNotifications() {
   if (!pushNotificationsAvailable()) {
     showToast("Push notifications are not available in this browser.");
     return;
   }
-  if (!supabaseConfigured() || !supabaseSignedIn()) {
-    showToast("Sign in before enabling reminders.");
-    return;
+  if (!pushConfigured()) return showToast("The reminder service is not configured.");
+  if (appState.notifications.pendingDelete) {
+    await flushPushRemoval();
+    if (appState.notifications.pendingDelete) return showToast("Reconnect to finish turning off the old subscription first.");
   }
   const publicKey = LOTUS_DEPLOYMENT.vapidPublicKey;
   if (!publicKey) {
@@ -839,7 +733,6 @@ async function enablePushNotifications() {
       return;
     }
 
-    await refreshSupabaseSession();
     const registration = await readyServiceWorker();
     let subscription = await registration.pushManager.getSubscription();
     if (subscription && !applicationServerKeysMatch(subscription, applicationServerKey)) {
@@ -853,24 +746,16 @@ async function enablePushNotifications() {
       });
     }
     const details = pushSubscriptionDetails(subscription);
-    const id = appState.notifications.pushSubscriptionId || createUuid();
-    const user = appState.supabase.session.user;
-    await supabaseRequest(`/rest/v1/${PUSH_TABLE}?on_conflict=owner_id,endpoint`, {
-      method: "POST",
-      headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
-      body: JSON.stringify({
-        id,
-        owner_id: user.id,
-        endpoint: details.endpoint,
-        p256dh: details.p256dh,
-        auth: details.auth,
-        timezone: browserTimeZone(),
-        updated_at: new Date().toISOString()
-      })
-    });
+    if (!appState.notifications.deviceId || !appState.notifications.deviceSecret || appState.notifications.pendingDelete) {
+      appState.notifications.deviceId = createUuid();
+      appState.notifications.deviceSecret = randomDeviceSecret();
+      appState.notifications.pendingDelete = false;
+      await saveVault();
+    }
+    await pushApi("register", { subscription: details, timezone: browserTimeZone() });
     appState.notifications.pushEnabled = true;
-    appState.notifications.pushSubscriptionId = id;
-    await saveVault({ markChanged: false, queue: false });
+    appState.notifications.endpoint = details.endpoint;
+    await saveVault();
     renderApp();
     showToast("Reminders enabled from 10:00 to 22:00 every two hours.");
   } catch (error) {
@@ -879,31 +764,31 @@ async function enablePushNotifications() {
 }
 
 async function disablePushNotifications({ silent = false } = {}) {
-  const subscriptionId = appState.notifications?.pushSubscriptionId;
+  let removalFailed = false;
   try {
     if (pushNotificationsAvailable()) {
       const registration = await readyServiceWorker();
       const subscription = await registration.pushManager.getSubscription();
       if (subscription) await subscription.unsubscribe();
     }
-    if (subscriptionId && supabaseConfigured() && supabaseSignedIn()) {
-      await supabaseRequest(`/rest/v1/${PUSH_TABLE}?id=eq.${encodeURIComponent(subscriptionId)}`, {
-        method: "DELETE"
-      });
-    }
   } catch (error) {
-    if (!silent) {
-      showToast(error.message || "Reminders could not be turned off.");
-      return;
-    }
+    removalFailed = true;
+  }
+  if (appState.notifications.deviceId && appState.notifications.deviceSecret) {
+    try { await pushApi("unregister"); } catch { removalFailed = true; }
   }
   appState.notifications.pushEnabled = false;
-  appState.notifications.pushSubscriptionId = null;
-  await saveVault({ markChanged: false, queue: false });
+  appState.notifications.pendingDelete = removalFailed;
+  if (!removalFailed) {
+    appState.notifications.deviceId = null;
+    appState.notifications.deviceSecret = null;
+    appState.notifications.endpoint = null;
+  }
+  await saveVault();
   clearReminderBadge();
   if (!silent) {
     renderApp();
-    showToast("Reminders turned off.");
+    showToast(removalFailed ? "Reminders turned off here. Server cleanup will retry online." : "Reminders turned off.");
   }
 }
 
@@ -984,11 +869,7 @@ function renderOnboarding(error = "") {
             <label class="field-label" for="name">What should Lotus call you?</label>
             <input class="text-input" id="name" name="name" autocomplete="name" placeholder="Your name" required maxlength="60" />
           </div>
-          <div class="form-field">
-            <label class="field-label" for="new-password">Create a master password</label>
-            <input class="text-input" id="new-password" name="password" type="password" autocomplete="new-password" placeholder="At least 8 characters" minlength="8" required />
-            <span class="helper-text">Your password protects everything stored on this device. Lotus cannot recover it.</span>
-          </div>
+          <p class="helper-text">Your check-ins stay on this device. Lotus opens without a password.</p>
           ${error ? `<p class="error-message" role="alert">${escapeHtml(error)}</p>` : ""}
           <button class="button-primary" type="submit">Begin gently ${icon("arrowRight", 18)}</button>
         </form>
@@ -997,21 +878,23 @@ function renderOnboarding(error = "") {
     </div>`;
 }
 
-function renderUnlock(error = "") {
+function renderMigration(error = "") {
   appRoot.innerHTML = `
     <div class="lock-screen">
-      <section class="welcome-card" aria-labelledby="unlock-title">
+      <section class="welcome-card" aria-labelledby="migration-title">
         <img class="welcome-icon" src="./assets/lotus.svg" alt="" />
-        <h1 id="unlock-title">LOTUS</h1>
-        <p>Your private tracker is resting. Enter your master password to continue.</p>
-        <form id="unlock-form" class="form-stack">
+        <h1 id="migration-title">LOTUS</h1>
+        <p>Bring your existing Lotus entries into this version. Enter the old master password once to unlock the previous data.</p>
+        <form id="migration-form" class="form-stack">
           <div class="form-field">
-            <label class="field-label" for="password">Master password</label>
+            <label class="field-label" for="password">Old master password</label>
             <input class="text-input" id="password" name="password" type="password" autocomplete="current-password" required autofocus />
           </div>
           ${error ? `<p class="error-message" role="alert">${escapeHtml(error)}</p>` : ""}
-          <button class="button-primary" type="submit">Unlock ${icon("lock", 18)}</button>
+          <button class="button-primary" type="submit">Import my entries ${icon("arrowRight", 18)}</button>
         </form>
+        <button class="button-quiet" type="button" data-action="start-fresh" style="margin-top:18px;">Start fresh instead</button>
+        <p class="helper-text">Starting fresh leaves your old encrypted data untouched in this browser.</p>
         <p class="welcome-version">v${APP_VERSION}</p>
       </section>
     </div>`;
@@ -1024,7 +907,6 @@ function renderTopbar() {
         <img class="brand-icon" src="./assets/lotus.svg" alt="" />
         <span class="brand-name">LOTUS</span>
       </a>
-      <button class="icon-button" type="button" data-action="lock" aria-label="Lock Lotus">${icon("lock", 20)}</button>
     </header>`;
 }
 
@@ -1056,14 +938,15 @@ function renderToday() {
   const log = getLog(today);
   const start = getLatestPeriodStart(today);
   const cycleDay = currentCycleDay(today);
-  const predicted = getNextPeriodStart(today);
+  const prediction = getPredictionDetails(today);
+  const predicted = prediction?.center;
   const periodActive = log?.flow && log.flow !== "none";
   const cycleLabel = !start ? "Your cycle" : periodActive ? `Period day ${cycleDay}` : `Cycle day ${cycleDay}`;
   const heroValue = !start ? "—" : cycleDay;
   const heroCaption = !start
     ? "When your next period begins, start here and Lotus will begin learning your rhythm."
     : predicted
-      ? `Next period estimate · ${formatDate(predicted, { month: "short", day: "numeric" })}`
+      ? `Next period estimate · ${prediction.rangeStart ? formatDateRange(prediction.rangeStart, prediction.rangeEnd) : formatDate(predicted, { month: "short", day: "numeric" })} · ${prediction.source === "lh" ? "LH-informed" : prediction.source === "recorded" ? "Recorded ovulation" : prediction.source === "personal" ? "Your ovulation estimate" : "Calendar-based"}`
       : "Your cycle estimate will appear here.";
   const checkinStatus = log ? "Saved" : "Not logged";
   const exercise = log?.exercise?.type && log.exercise.type !== "none" ? `${log.exercise.minutes || 0} min` : "Not logged";
@@ -1076,6 +959,10 @@ function renderToday() {
     : "Not logged";
   const bleedingImpact = formatBleedingImpact(log?.bleedingImpact);
   const moodPms = formatMoodPms(log?.moodPms);
+  const fertility = log?.fertility;
+  const fertilitySummary = fertility?.lh === "positive" ? "Positive LH test"
+    : fertility?.ovulationDate ? (fertility.ovulationSource === "clinician" ? "Recorded ovulation" : "Personal ovulation estimate")
+      : ["watery", "clear-stretchy"].includes(fertility?.mucus) ? "Fertile-type mucus" : null;
 
   return `
     <div class="page-heading">
@@ -1117,6 +1004,7 @@ function renderToday() {
         ${renderMetricTile("period-pain", "Period pain", periodPain, "pain")}
         ${renderMetricTile("bleeding-impact", "Bleeding impact", bleedingImpact, "drop")}
         ${renderMetricTile("mood-pms", "Mood & PMS", moodPms, "mood")}
+        ${fertilitySummary ? renderMetricTile("fertility", "Fertility observations", fertilitySummary, "drop") : ""}
       </div>
     </section>
 
@@ -1127,7 +1015,7 @@ function renderToday() {
       ${!start ? `<button class="action-row" type="button" data-action="start-period"><span class="action-row-copy">${icon("plus", 22)}<span><span class="action-row-title">Start a period</span><span class="action-row-subtitle">Mark today as day one</span></span></span>${icon("chevronRight", 18)}</button>` : ""}
       <button class="action-row" type="button" data-action="open-calendar"><span class="action-row-copy">${icon("calendar", 22)}<span><span class="action-row-title">See your calendar</span><span class="action-row-subtitle">Review patterns and estimates</span></span></span>${icon("chevronRight", 18)}</button>
     </section>
-    ${isBackupDue() ? `<section class="card card-pad backup-card" style="margin-top:18px;"><div class="backup-row"><div><h3>Monthly backup reminder</h3><p class="helper-text">Save an encrypted copy of your Lotus data when you have a quiet moment.</p></div>${icon("download", 24)}</div><div class="form-actions"><button class="button-primary" type="button" data-action="export-backup">Export backup</button></div></section>` : ""}`;
+    ${isBackupDue() ? `<section class="card card-pad backup-card" style="margin-top:18px;"><div class="backup-row"><div><h3>Monthly backup reminder</h3><p class="helper-text">Save a JSON copy of your Lotus data somewhere private when you have a quiet moment.</p></div>${icon("download", 24)}</div><div class="form-actions"><button class="button-primary" type="button" data-action="export-backup">Export backup</button></div></section>` : ""}`;
 }
 
 function renderMetricTile(id, label, value, iconName) {
@@ -1140,6 +1028,7 @@ function renderCalendar() {
   const today = localDateString(new Date());
   const model = getPredictionModel();
   const nextFertile = getNextFertileWindow(today);
+  const prediction = getPredictionDetails(today);
   const firstDay = new Date(year, month, 1, 12).getDay();
   const daysInMonth = new Date(year, month + 1, 0, 12).getDate();
   const previousMonthDays = new Date(year, month, 0, 12).getDate();
@@ -1161,13 +1050,18 @@ function renderCalendar() {
     const period = isPeriodDate(date);
     const predicted = !period && isPredictedPeriodDate(date);
     const fertile = !period && !predicted && isPossibleFertileDate(date);
+    const observed = appState.dailyLogs[date]?.fertility || {};
+    const lh = observed.lh === "positive";
+    const mucus = ["watery", "clear-stretchy"].includes(observed.mucus);
+    const recorded = Object.values(appState.dailyLogs).some((log) => log.fertility?.ovulationDate === date && log.fertility?.ovulationSource === "clinician");
+    const personal = !recorded && Object.values(appState.dailyLogs).some((log) => log.fertility?.ovulationDate === date && log.fertility?.ovulationSource === "personal");
     const marker = period || predicted
       ? '<span class="day-dot"></span>'
       : fertile
         ? '<span class="day-dot fertile-dot"></span>'
         : "";
-    const label = period ? ", period logged" : predicted ? ", estimated period" : fertile ? ", possible fertile window" : "";
-    cells.push(`<button class="day-cell ${outside ? "outside" : ""} ${date === today ? "today" : ""} ${period ? "period" : ""} ${predicted ? "predicted" : ""} ${fertile ? "fertile" : ""}" type="button" data-date="${date}" aria-label="${formatDate(date)}${label}">${parseDate(date).getDate()}${marker}</button>`);
+    const label = `${period ? ", period logged" : predicted ? ", estimated period" : fertile ? ", possible fertile window" : ""}${lh ? ", positive LH test" : ""}${mucus ? ", fertile-type mucus recorded" : ""}${recorded ? ", clinician-confirmed ovulation date recorded" : ""}${personal ? ", personal ovulation estimate" : ""}`;
+    cells.push(`<button class="day-cell ${outside ? "outside" : ""} ${date === today ? "today" : ""} ${period ? "period" : ""} ${predicted ? "predicted" : ""} ${fertile ? "fertile" : ""} ${lh ? "lh-day" : ""} ${mucus ? "mucus-day" : ""} ${recorded ? "recorded-day" : ""} ${personal ? "personal-day" : ""}" type="button" data-date="${date}" aria-label="${formatDate(date)}${label}">${parseDate(date).getDate()}${marker}</button>`);
   }
 
   const latest = getLatestPeriodStart(today);
@@ -1191,18 +1085,23 @@ function renderCalendar() {
         <span class="legend-item"><span class="legend-marker period-marker"></span>Logged period</span>
         <span class="legend-item"><span class="legend-marker predicted-marker"></span>Estimate</span>
         <span class="legend-item"><span class="legend-marker fertile-marker"></span>Possible fertile window</span>
+        <span class="legend-item"><span class="legend-marker lh-marker"></span>LH test</span>
+        <span class="legend-item"><span class="legend-marker mucus-marker"></span>Fertile sign</span>
+        <span class="legend-item"><span class="legend-marker recorded-marker"></span>Recorded ovulation</span>
+        <span class="legend-item"><span class="legend-marker personal-marker"></span>Your estimate</span>
       </div>
     </section>
     <div class="section-heading"><h2>Cycle overview</h2></div>
     <section class="card card-pad overview-grid">
       <div class="stat-block"><span class="mini-label">Latest start</span><strong class="stat-value">${latest ? formatDate(latest, { month: "short", day: "numeric" }) : "Not logged"}</strong><span class="stat-detail">Tap a day to begin tracking.</span></div>
-      <div class="stat-block"><span class="mini-label">Next estimate</span><strong class="stat-value">${next ? formatDate(next, { month: "short", day: "numeric" }) : "Not available"}</strong><span class="stat-detail">${model?.historyCount ? `Based on ${model.historyCount} completed cycle${model.historyCount === 1 ? "" : "s"}.` : "Based on your cycle setting after a start is logged."}</span></div>
+      <div class="stat-block"><span class="mini-label">Next estimate</span><strong class="stat-value">${prediction?.rangeStart ? formatDateRange(prediction.rangeStart, prediction.rangeEnd) : next ? formatDate(next, { month: "short", day: "numeric" }) : "Not available"}</strong><span class="stat-detail">${prediction?.source === "lh" ? "Possible range after LH surge; ovulation is not confirmed." : prediction?.source === "recorded" ? "Based on your recorded ovulation date." : prediction?.source === "personal" ? "Based on your personal ovulation estimate." : model?.historyCount ? `Calendar estimate from ${model.historyCount} completed cycle${model.historyCount === 1 ? "" : "s"}.` : "Based on your cycle setting after a start is logged."}</span></div>
       <div class="stat-block"><span class="mini-label">Possible fertile window</span><strong class="stat-value">${nextFertile ? formatDateRange(nextFertile.fertileStart, nextFertile.fertileEnd) : "Not available"}</strong><span class="stat-detail">A calendar estimate, not contraception.</span></div>
     </section>`;
 }
 
 function renderCheckin() {
   const log = getLog(selectedDate) || {};
+  const fertility = log.fertility || { lh: "not-tested", lhTime: "", mucus: "not-observed", ovulationDate: "", ovulationSource: "personal" };
   const exercise = log.exercise || { type: "none", minutes: 0 };
   const water = clamp(Number(log.water) || 0, 0, 20);
   const breastSoreness = validChoice(SORENESS_OPTIONS, log.breastSoreness, "none");
@@ -1231,6 +1130,21 @@ function renderCheckin() {
         <div class="form-field">
           <span class="field-label">Period flow</span>
           <div class="segmented-control" role="group" aria-label="Period flow">${renderChoiceGroup("flow", FLOW_OPTIONS, log.flow || "none")}</div>
+        </div>
+        <div class="form-field measurement-field">
+          <span class="field-label">Fertility observations <span class="helper-text">Optional</span></span>
+          <span class="helper-text">An LH surge can precede ovulation; it does not confirm it. These estimates are not contraception.</span>
+          <label class="subfield-label" for="lh-result">Urine LH test</label>
+          <select class="select-input" id="lh-result" name="lh-result">${LH_OPTIONS.map(([value, label]) => `<option value="${value}" ${fertility.lh === value ? "selected" : ""}>${label}</option>`).join("")}</select>
+          <label class="subfield-label" for="lh-time">Test time (optional)</label>
+          <input class="text-input" id="lh-time" name="lh-time" type="time" value="${escapeHtml(fertility.lhTime || "")}" />
+          <label class="subfield-label" for="mucus">Cervical mucus</label>
+          <select class="select-input" id="mucus" name="mucus">${MUCUS_OPTIONS.map(([value, label]) => `<option value="${value}" ${fertility.mucus === value ? "selected" : ""}>${label}</option>`).join("")}</select>
+          <label class="subfield-label" for="ovulation-date">Ovulation date (optional)</label>
+          <input class="text-input" id="ovulation-date" name="ovulation-date" type="date" max="${localDateString(new Date())}" value="${escapeHtml(fertility.ovulationDate || "")}" />
+          <label class="subfield-label" for="ovulation-source">Source of that date</label>
+          <select class="select-input" id="ovulation-source" name="ovulation-source">${OVULATION_SOURCE_OPTIONS.map(([value, label]) => `<option value="${value}" ${fertility.ovulationSource === value ? "selected" : ""}>${label}</option>`).join("")}</select>
+          <span class="helper-text">Choose “Clinician confirmed” only when a clinician has supplied the date. Personal estimates stay labeled as estimates.</span>
         </div>
         <div class="form-field measurement-field">
           <span class="field-label">Bleeding impact</span>
@@ -1307,6 +1221,11 @@ function renderInsights() {
   const average = calculatedAverage || appState.profile.averageCycleLength;
   const latest = starts.at(-1);
   const next = getNextPeriodStart();
+  const prediction = getPredictionDetails();
+  const luteal = getLutealHistory();
+  const observations = Object.values(appState.dailyLogs).map((log) => log.fertility || {});
+  const lhDays = observations.filter((item) => item.lh === "positive").length;
+  const confirmedDates = new Set(observations.filter((item) => item.ovulationDate && item.ovulationSource === "clinician").map((item) => item.ovulationDate)).size;
   const loggedDays = Object.values(appState.dailyLogs).filter((log) => log.flow && log.flow !== "none").length;
   const exerciseDays = Object.values(appState.dailyLogs).filter((log) => log.exercise?.type && log.exercise.type !== "none").length;
   return `
@@ -1326,37 +1245,16 @@ function renderInsights() {
     <section class="card card-pad">
       <div class="settings-list">
         <div class="settings-row"><div class="settings-row-copy"><span class="settings-row-title">Latest period start</span><span class="settings-row-detail">${latest ? formatDate(latest) : "Nothing logged yet"}</span></div></div>
-        <div class="settings-row"><div class="settings-row-copy"><span class="settings-row-title">Next period estimate</span><span class="settings-row-detail">${next ? `${formatDate(next)} · an estimate, not a promise` : "Available after your first period is logged"}</span></div></div>
+        <div class="settings-row"><div class="settings-row-copy"><span class="settings-row-title">Next period estimate</span><span class="settings-row-detail">${prediction?.rangeStart ? `${formatDateRange(prediction.rangeStart, prediction.rangeEnd)} · possible range` : next ? `${formatDate(next)} · calendar estimate` : "Available after your first period is logged"}</span></div></div>
         <div class="settings-row"><div class="settings-row-copy"><span class="settings-row-title">Logged cycles</span><span class="settings-row-detail">${starts.length} start${starts.length === 1 ? "" : "s"} recorded</span></div></div>
+        <div class="settings-row"><div class="settings-row-copy"><span class="settings-row-title">LH and recorded ovulation</span><span class="settings-row-detail">${lhDays} positive LH day${lhDays === 1 ? "" : "s"} · ${confirmedDates} clinician-confirmed date${confirmedDates === 1 ? "" : "s"}</span></div></div>
+        ${luteal ? `<div class="settings-row"><div class="settings-row-copy"><span class="settings-row-title">Personal luteal estimate</span><span class="settings-row-detail">About ${luteal.days} days from ${luteal.count} cycles with a clinician-confirmed date.</span></div></div>` : ""}
       </div>
     </section>
     <div class="section-heading"><h2>Monthly backup</h2></div>
     <section class="card card-pad backup-card">
-      <div class="backup-row"><div><h3>${isBackupDue() ? "A backup would be kind" : "Your backup is up to date"}</h3><p class="helper-text">${appState.backup.lastBackupAt ? `Last backup: ${formatDate(localDateString(new Date(appState.backup.lastBackupAt)), { month: "short", day: "numeric", year: "numeric" })}.` : "Save an encrypted copy of your Lotus data once a month."}</p></div>${icon(isBackupDue() ? "download" : "check", 26)}</div>
-      <div class="form-actions"><button class="button-primary" type="button" data-action="export-backup">Export encrypted backup</button></div>
-    </section>`;
-}
-
-function renderSupabaseSettings() {
-  const session = appState.supabase?.session;
-  const status = !supabaseConfigured()
-    ? "Setup required"
-    : session
-      ? (appState.sync.status === "error" ? "Needs attention" : appState.sync.status === "synced" ? "Synced" : "Ready")
-      : "Signed out";
-  return `
-    <div class="section-heading"><h2>Data &amp; sync</h2></div>
-    <section class="card card-pad">
-      <div class="backup-row"><div><h3>Encrypted sync</h3><p class="helper-text">Lotus stays local-first and encrypts your vault before anything is synced.</p></div><span class="status-chip ${session ? "strong" : ""}">${status}</span></div>
-      ${session ? `
-        <div class="settings-row" style="margin-top:12px;"><div class="settings-row-copy"><span class="settings-row-title">Signed in as ${escapeHtml(session.user.email || "your Supabase account")}</span><span class="settings-row-detail">${appState.sync.remoteUpdatedAt ? `Last remote update: ${formatDate(localDateString(new Date(appState.sync.remoteUpdatedAt)), { month: "short", day: "numeric", year: "numeric" })}.` : "No remote vault has been created yet."}</span></div>${icon("check", 22)}</div>
-        <div class="form-actions"><button class="button-primary supabase-sync-button" type="button" data-action="sync-now">Sync now</button><button class="button-quiet" type="button" data-action="signout-supabase">Sign out</button></div>` : supabaseConfigured() ? `
-        <form id="supabase-auth-form" class="form-stack" style="margin-top:22px;">
-          <div class="form-field"><label class="field-label" for="supabase-email">Email</label><input class="text-input" id="supabase-email" name="email" type="email" autocomplete="email" required /></div>
-          <div class="form-field"><label class="field-label" for="supabase-password">Supabase password</label><input class="text-input" id="supabase-password" name="password" type="password" autocomplete="current-password" minlength="6" required /></div>
-          <div class="form-actions"><button class="button-secondary" type="submit" name="authAction" value="signin">Sign in</button><button class="button-primary" type="submit" name="authAction" value="signup">Create account</button></div>
-        </form>` : `
-        <p class="helper-text settings-guidance">Encrypted sync is unavailable because this deployment is missing its connection configuration.</p>`}
+      <div class="backup-row"><div><h3>${isBackupDue() ? "A backup would be kind" : "Your backup is up to date"}</h3><p class="helper-text">${appState.backup.lastBackupAt ? `Last backup: ${formatDate(localDateString(new Date(appState.backup.lastBackupAt)), { month: "short", day: "numeric", year: "numeric" })}.` : "Save a JSON copy of your Lotus data once a month."}</p></div>${icon(isBackupDue() ? "download" : "check", 26)}</div>
+      <div class="form-actions"><button class="button-primary" type="button" data-action="export-backup">Export JSON backup</button></div>
     </section>`;
 }
 
@@ -1364,8 +1262,6 @@ function renderReminderSettings() {
   const pushSupported = pushNotificationsAvailable();
   const pushStored = Boolean(appState.notifications?.pushEnabled);
   const pushPermission = pushSupported ? Notification.permission : "unsupported";
-  const pushSignedIn = supabaseConfigured() && supabaseSignedIn();
-  const pushPublicKey = LOTUS_DEPLOYMENT.vapidPublicKey;
   const pushActive = pushStored && pushPermission === "granted";
   const pushStatus = pushActive
     ? "On"
@@ -1373,9 +1269,7 @@ function renderReminderSettings() {
       ? "Blocked"
       : !pushSupported
         ? "Unavailable"
-        : !pushSignedIn
-          ? "Sign in required"
-          : !pushPublicKey
+        : !pushConfigured()
             ? "Needs public key"
             : "Off";
   return `
@@ -1389,10 +1283,10 @@ function renderReminderSettings() {
       </div>
       <div class="form-actions reminder-actions">
         ${pushActive ? `<button class="button-secondary" type="button" data-action="test-notification">Test this device</button>` : ""}
-        <button class="${pushActive ? "button-quiet" : "button-primary"}" type="button" data-action="${pushActive ? "disable-push" : "enable-push"}" ${(!pushSupported || (!pushSignedIn && !pushStored) || (!pushPublicKey && !pushStored)) ? "disabled" : ""}>${pushActive ? "Turn off reminders" : "Enable reminders"}</button>
+        <button class="${pushActive ? "button-quiet" : "button-primary"}" type="button" data-action="${pushActive ? "disable-push" : "enable-push"}" ${(!pushSupported || (!pushConfigured() && !pushStored)) ? "disabled" : ""}>${pushActive ? "Turn off reminders" : "Enable reminders"}</button>
       </div>
       ${pushActive ? '<p class="helper-text settings-guidance">On supported devices, the app icon shows how many reminders arrived since you last opened Lotus.</p>' : ""}
-      ${pushPermission === "denied" ? '<p class="helper-text settings-guidance">Notifications are blocked for Lotus. Allow them in your device settings, then return here.</p>' : !pushSupported ? '<p class="helper-text settings-guidance">On iPhone, install Lotus on the Home Screen before enabling notifications.</p>' : !pushSignedIn ? '<p class="helper-text settings-guidance">Sign in under Data &amp; sync to receive the reminder while Lotus is closed.</p>' : !pushPublicKey ? '<p class="helper-text settings-guidance">The reminder service is unavailable because this deployment is missing its public notification configuration.</p>' : ""}
+      ${pushPermission === "denied" ? '<p class="helper-text settings-guidance">Notifications are blocked for Lotus. Allow them in your device settings, then return here.</p>' : !pushSupported ? '<p class="helper-text settings-guidance">On iPhone, install Lotus on the Home Screen before enabling notifications.</p>' : !pushConfigured() ? '<p class="helper-text settings-guidance">The reminder service is unavailable until its public configuration is added.</p>' : ""}
     </section>`;
 }
 
@@ -1417,11 +1311,10 @@ function renderSettings() {
       </form>
     </section>
     ${renderReminderSettings()}
-    ${renderSupabaseSettings()}
     <div class="section-heading"><h2>Backup</h2></div>
     <section class="card card-pad backup-card">
-      <h3>Encrypted JSON backup</h3>
-      <p class="helper-text" style="margin-top:8px;">Backups contain encrypted data. You will need this same master password to restore them.</p>
+      <h3>JSON backup</h3>
+      <p class="helper-text" style="margin-top:8px;">Backups are readable JSON files with your period and wellbeing entries. Keep the downloaded file somewhere private.</p>
       <div class="settings-list" style="margin-top:12px;">
         <div class="settings-row backup-setting-row"><div class="settings-row-copy"><span class="settings-row-title">Last backup</span><span class="settings-row-detail">${lastBackup ? formatDate(localDateString(new Date(lastBackup)), { month: "long", day: "numeric", year: "numeric" }) : "Not yet backed up"}</span></div><button class="button-quiet" type="button" data-action="export-backup">${icon("download", 17)} Export</button></div>
         <div class="settings-row backup-setting-row"><div class="settings-row-copy"><span class="settings-row-title">Restore a backup</span><span class="settings-row-detail">This replaces the data currently on this device.</span></div><label class="button-quiet" for="restore-file">${icon("upload", 17)} Choose file</label><input class="screen-reader-only" id="restore-file" type="file" accept="application/json,.json" data-action="restore-backup" /></div>
@@ -1429,8 +1322,9 @@ function renderSettings() {
     </section>
     <div class="section-heading"><h2>Privacy</h2></div>
     <section class="card card-pad">
-      <div class="settings-row"><div class="settings-row-copy"><span class="settings-row-title">Local-first protection</span><span class="settings-row-detail">Your entries are encrypted on this device and before they are synced or exported.</span></div>${icon("lock", 22)}</div>
-      <div class="form-actions"><button class="button-secondary" type="button" data-action="lock">Lock Lotus now ${icon("lock", 17)}</button></div>
+      <div class="settings-row"><div class="settings-row-copy"><span class="settings-row-title">Local data</span><span class="settings-row-detail">Entries stay on this device and work offline. Only an anonymous device subscription is sent for reminders.</span></div>${icon("check", 22)}</div>
+      <p class="helper-text">No app password or encryption. Someone with access to this device or an exported backup can read your entries.</p>
+      <p class="helper-text">Lotus v${APP_VERSION}</p>
     </section>`;
 }
 
@@ -1451,41 +1345,40 @@ function renderError(message) {
 
 async function createAccount(form) {
   const name = form.elements.name.value.trim();
-  const password = form.elements.password.value;
   if (!name) return renderOnboarding("Please enter your name.");
-  if (password.length < 8) return renderOnboarding("Your master password needs at least 8 characters.");
   appState = defaultState(name);
-  currentPassword = password;
   await saveVault();
   activeView = "today";
   renderApp();
 }
 
-async function unlockAccount(form) {
+async function migrateLegacy(form) {
   const password = form.elements.password.value;
   try {
-    const envelope = await readStoredVault();
+    const envelope = await readStoredVault(LEGACY_DB_NAME, LEGACY_STORE_NAME);
     if (!envelope) {
-      renderOnboarding("Your local vault could not be found. Please create Lotus again.");
+      renderOnboarding("The previous Lotus data is no longer available here.");
       return;
     }
     appState = normaliseState(await decryptEnvelope(envelope, password));
-    currentPassword = password;
+    appState.notifications = defaultState("").notifications;
+    await saveVault();
+    const check = await readStoredVault();
+    if (!check?.data?.profile) throw new Error("Could not verify the imported data.");
+    if (pushNotificationsAvailable()) {
+      try {
+        const registration = await readyServiceWorker();
+        const oldSubscription = await registration.pushManager.getSubscription();
+        if (oldSubscription) await oldSubscription.unsubscribe();
+      } catch { /* The stored entries have already migrated safely. */ }
+    }
     activeView = "today";
     renderApp();
-    if (supabaseConfigured() && supabaseSignedIn()) {
-      syncNow({ silent: true }).then(() => { if (appState) renderApp(); });
-    }
+    showToast("Your Lotus entries are now on this device.");
   } catch (error) {
-    renderUnlock("That password did not unlock your Lotus data.");
+    appState = null;
+    renderMigration("The old password could not import your entries. Please try again.");
   }
-}
-
-async function lockApp() {
-  appState = null;
-  currentPassword = null;
-  activeView = "today";
-  renderUnlock();
 }
 
 async function startPeriod() {
@@ -1506,6 +1399,7 @@ async function startPeriod() {
     sexDrive: appState.dailyLogs[today]?.sexDrive || null,
     exercise: appState.dailyLogs[today]?.exercise || { type: "none", minutes: 0 },
     water: appState.dailyLogs[today]?.water || 0,
+    fertility: appState.dailyLogs[today]?.fertility || { lh: "not-tested", lhTime: "", mucus: "not-observed", ovulationDate: "", ovulationSource: "personal" },
     updatedAt: new Date().toISOString(),
     deletedAt: null
   };
@@ -1542,6 +1436,16 @@ async function saveCheckin(form) {
   const exerciseType = form.dataset.exercise || "none";
   const exerciseMinutes = clamp(Number($("#exercise-minutes", form)?.value || 0), 0, 120);
   const water = clamp(Number(form.dataset.water || 0), 0, 20);
+  const ovulationDate = form.elements["ovulation-date"].value;
+  if (date > localDateString(new Date()) && (form.elements["lh-result"].value !== "not-tested"
+    || form.elements.mucus.value !== "not-observed" || ovulationDate)) {
+    showToast("Fertility observations can only be logged for today or earlier.");
+    return;
+  }
+  if (ovulationDate && (ovulationDate > localDateString(new Date()) || !/^\d{4}-\d{2}-\d{2}$/.test(ovulationDate))) {
+    showToast("Ovulation date must be a valid past or current date.");
+    return;
+  }
   appState.dailyLogs[date] = {
     id: existing.id || `log_${date}`,
     date,
@@ -1555,6 +1459,13 @@ async function saveCheckin(form) {
     sexDrive,
     exercise: { type: exerciseType, minutes: exerciseMinutes },
     water,
+    fertility: {
+      lh: validChoice(LH_OPTIONS, form.elements["lh-result"].value, "not-tested"),
+      lhTime: form.elements["lh-time"].value || "",
+      mucus: validChoice(MUCUS_OPTIONS, form.elements.mucus.value, "not-observed"),
+      ovulationDate,
+      ovulationSource: validChoice(OVULATION_SOURCE_OPTIONS, form.elements["ovulation-source"].value, "personal")
+    },
     updatedAt: new Date().toISOString(),
     deletedAt: null
   };
@@ -1578,58 +1489,17 @@ async function saveSettings(form) {
   renderApp();
 }
 
-async function authenticateSupabase(form, action) {
-  if (!supabaseConfigured()) {
-    showToast("Save the Supabase connection first.");
-    return;
-  }
-  const email = form.elements.email.value.trim();
-  const password = form.elements.password.value;
-  try {
-    const endpoint = action === "signup" ? "/auth/v1/signup" : "/auth/v1/token?grant_type=password";
-    const response = await supabaseRequest(endpoint, {
-      method: "POST",
-      body: JSON.stringify({ email, password }),
-      token: null
-    });
-    if (!response?.access_token) {
-      showToast("Account created. Check your email to confirm it, then sign in.");
-      renderApp();
-      return;
-    }
-    storeSupabaseSession(response);
-    await saveVault({ markChanged: false, queue: false });
-    await syncNow({ silent: true });
-    renderApp();
-    showToast(appState.sync.status === "synced"
-      ? (action === "signup" ? "Account created and Lotus is synced." : "Signed in and Lotus is synced.")
-      : "Signed in. Your local data is safe; sync needs attention.");
-  } catch (error) {
-    showToast(error.message || "Supabase could not complete that request.");
-  }
-}
-
-async function signOutSupabase() {
-  if (appState.notifications?.pushEnabled) await disablePushNotifications({ silent: true });
-  appState.supabase.session = null;
-  appState.sync.enabled = false;
-  appState.sync.mode = "local-first";
-  appState.sync.status = "local";
-  await saveVault({ markChanged: false, queue: false });
-  renderApp();
-  showToast("Signed out of Supabase. Your local data remains here.");
-}
-
 async function exportBackup() {
   appState.backup.lastBackupAt = new Date().toISOString();
   await saveVault();
-  const encrypted = await encryptState(appState, currentPassword);
+  const data = JSON.parse(JSON.stringify(appState));
+  data.notifications = defaultState("").notifications;
   const backup = {
     app: "Lotus",
-    format: "lotus-encrypted-json",
-    formatVersion: 1,
+    format: "lotus-local-json",
+    formatVersion: 2,
     exportedAt: new Date().toISOString(),
-    vault: encrypted
+    data
   };
   const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
@@ -1640,7 +1510,7 @@ async function exportBackup() {
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
-  showToast("Encrypted backup exported.");
+  showToast("JSON backup exported.");
   renderApp();
 }
 
@@ -1648,16 +1518,33 @@ async function restoreBackup(input) {
   const file = input.files?.[0];
   input.value = "";
   if (!file) return;
+  if (file.size > 12 * 1024 * 1024) return showToast("This backup is too large to import.");
   if (!window.confirm("Restore this backup? It will replace the Lotus data currently on this device.")) return;
+  const previous = appState;
   try {
     const backup = JSON.parse(await file.text());
-    if (backup.app !== "Lotus" || backup.format !== "lotus-encrypted-json" || !backup.vault) throw new Error("Invalid backup");
-    appState = normaliseState(await decryptEnvelope(backup.vault, currentPassword));
+    if (backup.app !== "Lotus") throw new Error("Invalid backup");
+    let data;
+    if (backup.format === "lotus-local-json" && backup.formatVersion === 2) {
+      data = backup.data;
+    } else if (backup.format === "lotus-encrypted-json" && backup.vault) {
+      const oldPassword = window.prompt("Enter the old Lotus master password once to import this encrypted backup.");
+      if (!oldPassword) return;
+      data = await decryptEnvelope(backup.vault, oldPassword);
+    } else {
+      throw new Error("Invalid backup");
+    }
+    if (!data || typeof data.profile?.name !== "string" || !data.dailyLogs
+      || typeof data.dailyLogs !== "object" || Array.isArray(data.dailyLogs)
+      || !Array.isArray(data.periodStarts)) throw new Error("Invalid data");
+    appState = normaliseState(data);
+    appState.notifications = previous.notifications;
     await saveVault();
     renderApp();
     showToast("Backup restored.");
   } catch (error) {
-    showToast("This backup could not be restored with the current password.");
+    appState = previous;
+    showToast("This backup could not be restored.");
   }
 }
 
@@ -1714,7 +1601,7 @@ document.addEventListener("click", async (event) => {
   const action = event.target.closest("[data-action]");
   if (!action) return;
   const actionName = action.dataset.action;
-  if (actionName === "lock") return lockApp();
+  if (actionName === "start-fresh") return renderOnboarding();
   if (actionName === "start-period") return startPeriod();
   if (actionName === "open-checkin") {
     selectedDate = localDateString(new Date());
@@ -1741,8 +1628,6 @@ document.addEventListener("click", async (event) => {
   if (actionName === "disable-push") return disablePushNotifications();
   if (actionName === "test-notification") return testDeviceNotification();
   if (actionName === "export-backup") return exportBackup();
-  if (actionName === "sync-now") return syncNow({ silent: false });
-  if (actionName === "signout-supabase") return signOutSupabase();
 });
 
 document.addEventListener("submit", async (event) => {
@@ -1750,10 +1635,9 @@ document.addEventListener("submit", async (event) => {
   const form = event.target;
   try {
     if (form.id === "onboarding-form") await createAccount(form);
-    if (form.id === "unlock-form") await unlockAccount(form);
+    if (form.id === "migration-form") await migrateLegacy(form);
     if (form.id === "checkin-form") await saveCheckin(form);
     if (form.id === "settings-form") await saveSettings(form);
-    if (form.id === "supabase-auth-form") await authenticateSupabase(form, event.submitter?.value || "signin");
   } catch (error) {
     showToast("Lotus could not save that just now.");
   }
@@ -1775,22 +1659,33 @@ document.addEventListener("change", async (event) => {
 });
 
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") clearReminderBadge();
+  if (document.visibilityState === "visible") {
+    clearReminderBadge();
+    flushPushRemoval();
+  }
 });
+window.addEventListener("online", flushPushRemoval);
 
 async function boot() {
   if (!window.crypto?.subtle) {
-    renderError("Lotus needs a secure browser context to protect your data. Open the installed PWA or use a local web server.");
+    renderError("Lotus needs a secure browser context for its data migration and reminders. Open the installed PWA or use a local web server.");
     return;
   }
   try {
     const stored = await readStoredVault();
-    if (stored) renderUnlock();
-    else renderOnboarding();
+    if (stored?.data) {
+      appState = normaliseState(stored.data);
+      renderApp();
+      flushPushRemoval();
+    } else if (await readStoredVault(LEGACY_DB_NAME, LEGACY_STORE_NAME)) {
+      renderMigration();
+    } else {
+      renderOnboarding();
+    }
     if ("serviceWorker" in navigator) navigator.serviceWorker.register("./service-worker.js").catch(() => {});
     clearReminderBadge();
   } catch (error) {
-    renderError("Lotus could not prepare private local storage in this browser.");
+    renderError("Lotus could not prepare local storage in this browser.");
   }
 }
 

@@ -1,6 +1,6 @@
 import webpush from "npm:web-push@3.6.7";
 
-const PUSH_TABLE = "q4n8";
+const PUSH_TABLE = "lotus_push_v2";
 const REMINDER_TEXT = "Take some time to pause and reflect.";
 const REMINDER_HOURS = new Set([10, 12, 14, 16, 18, 20, 22]);
 const DEFAULT_TIMEZONE = Deno.env.get("LOTUS_DEFAULT_TIMEZONE") || "UTC";
@@ -36,10 +36,10 @@ function isAuthorized(request: Request) {
 
 async function supabaseRest(path: string, options: RequestInit = {}) {
   const supabaseUrl = getRequiredSecret("SUPABASE_URL").replace(/\/+$/, "");
-  const serviceRoleKey = getRequiredSecret("SUPABASE_SERVICE_ROLE_KEY");
+  const serviceRoleKey = Deno.env.get("SUPABASE_SECRET_KEY") || getRequiredSecret("SUPABASE_SERVICE_ROLE_KEY");
   const headers = new Headers(options.headers || {});
   headers.set("apikey", serviceRoleKey);
-  headers.set("Authorization", `Bearer ${serviceRoleKey}`);
+  if (!serviceRoleKey.startsWith("sb_secret_")) headers.set("Authorization", `Bearer ${serviceRoleKey}`);
   if (options.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   const response = await fetch(`${supabaseUrl}${path}`, { ...options, headers });
   const raw = await response.text();
@@ -82,7 +82,7 @@ function localClock(timeZone: string | null, instant: Date) {
 
 async function claimReminderSlot(id: string, date: string, hour: number) {
   // The database claims each local time slot atomically, even if cron overlaps.
-  return await supabaseRest("/rest/v1/rpc/n9c4", {
+  return await supabaseRest("/rest/v1/rpc/lotus_v2_claim_slot", {
     method: "POST",
     body: JSON.stringify({ p_id: id, p_date: date, p_hour: hour })
   }) === true;

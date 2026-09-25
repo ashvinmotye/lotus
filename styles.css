@@ -558,6 +558,23 @@ h3 {
   background: var(--brand);
 }
 
+.day-cell.mucus-day::after,
+.day-cell.lh-day::after,
+.day-cell.recorded-day::after,
+.day-cell.personal-day::after {
+  position: absolute;
+  top: 3px;
+  right: 4px;
+  font-size: 0.52rem;
+  font-weight: 400;
+  line-height: 1;
+}
+
+.day-cell.mucus-day::after { content: "M"; color: var(--brand); }
+.day-cell.lh-day::after { content: "LH"; color: var(--body); }
+.day-cell.recorded-day::after { content: "O"; color: var(--body); text-decoration: underline; }
+.day-cell.personal-day::after { content: "?"; color: var(--body); }
+
 .legend {
   display: flex;
   flex-wrap: wrap;
@@ -594,6 +611,11 @@ h3 {
   border-color: var(--brand);
   background: var(--soft-brand);
 }
+
+.legend-marker.lh-marker { border: 3px solid var(--body); }
+.legend-marker.mucus-marker { border-color: var(--brand); background: var(--soft-brand); }
+.legend-marker.recorded-marker { border-color: var(--body); background: var(--body); }
+.legend-marker.personal-marker { border-color: var(--body); border-style: dashed; }
 
 .overview-grid,
 .insights-grid {
